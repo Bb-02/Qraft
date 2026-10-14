@@ -121,7 +121,11 @@ func (r *WorkflowTaskResolver) Resolve(ctx context.Context, workflowID, workflow
 	if position > 0 {
 		task.Position = &position
 		name := "生成题目"
-		if problem != nil {
+		if slot != nil && slot.Regenerate && strings.TrimSpace(slot.Title) != "" {
+			// Early failures may save the request text as a placeholder title.
+			// Keep the planned business name for an incomplete candidate.
+			name = slot.Title
+		} else if problem != nil {
 			name = problem.Title
 		} else if slot != nil && strings.TrimSpace(slot.Title) != "" {
 			name = slot.Title

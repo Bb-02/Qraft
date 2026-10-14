@@ -36,9 +36,10 @@ func EnrichFailure(failure *domain.GenerationFailure) *domain.GenerationFailure 
 
 func unsupportedInputFailure(diagnostic string) *domain.GenerationFailure {
 	text := strings.ToLower(diagnostic)
-	declaredInputSupport := strings.HasPrefix(text, "supportedinput") || strings.Contains(text, " supportedinput") || strings.HasPrefix(text, "supported input") || strings.Contains(text, " supported input")
+	declaredInputSupport := strings.HasPrefix(text, "supportedinput") || strings.Contains(text, " supportedinput") || strings.HasPrefix(text, "supported input") || strings.Contains(text, " supported input") || strings.Contains(text, "supported_input_symbol_types")
 	if (strings.Contains(text, "current pipeline") || strings.Contains(text, "current authoring pipeline") || declaredInputSupport) &&
-		(strings.Contains(text, "unsupported") || strings.Contains(text, "only support") || strings.Contains(text, "supports only") || strings.Contains(text, "not support") || strings.Contains(text, "limited to")) {
+		(strings.Contains(text, "unsupported") || strings.Contains(text, "only support") || strings.Contains(text, "supports only") || strings.Contains(text, "not support") || strings.Contains(text, "limited to") ||
+			(strings.Contains(text, "restrict") && strings.Contains(text, "to only")) || strings.Contains(text, "not available as an input symbol")) {
 		retryable := false
 		return &domain.GenerationFailure{Code: "unsupported_input_format", Category: "流程能力限制", Stage: "设计题意与约束", Message: "这次题目设计因输入格式支持范围被拒绝",
 			Reason:     "该次任务的出题流程或模型将所需输入格式判断为超出当时支持范围；这项结果不表示目标难度不合法或题目质量差。",

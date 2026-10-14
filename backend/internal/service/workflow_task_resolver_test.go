@@ -123,6 +123,20 @@ func TestWorkflowTaskResolverStoredOldCandidateDoesNotInheritNewRunStatus(t *tes
 	require.Contains(t, task.Title, fixture.problem.Title)
 }
 
+func TestWorkflowTaskResolverIncompleteCandidateUsesPlannedTitle(t *testing.T) {
+	ctx, fixture, resolver, root, child := newWorkflowTaskFixture(t)
+	fixture.set.Generation.Slots[1].Regenerate = true
+	fixture.problem = &domain.Problem{ID: uuid.New(), Title: "合成生成请求全文占位标题", WorkflowID: &child, Status: domain.ProblemStatusQuarantined}
+	task, err := resolver.Resolve(ctx, child, generationapi.QualityWorkflowTypeV1, root)
+	require.NoError(t, err)
+	require.Equal(t, "合成基础训练赛 · 第 2 题：基础模拟", task.Title)
+	require.Equal(t, "/problems/"+fixture.problem.ID.String(), task.ResultURL)
+	fixture.set.Generation.Slots[1].Regenerate = false
+	task, err = resolver.Resolve(ctx, child, generationapi.QualityWorkflowTypeV1, root)
+	require.NoError(t, err)
+	require.Contains(t, task.Title, fixture.problem.Title, "a complete saved candidate retains its own title")
+}
+
 func TestWorkflowTaskResolverRechecksCurrentEntityVisibility(t *testing.T) {
 	for _, tc := range []struct {
 		name         string

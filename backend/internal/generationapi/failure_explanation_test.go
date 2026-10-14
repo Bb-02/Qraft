@@ -61,3 +61,22 @@ func TestUnsupportedInputFormatHasCapabilityExplanation(t *testing.T) {
 		require.NotContains(t, got.Suggestion, "人工确认")
 	}
 }
+
+func TestDeclaredInputSymbolRestrictionIsExplainedAsHistoricalPipelineCapability(t *testing.T) {
+	for _, diagnostic := range []string{
+		"The synthetic task needs a string. Generation parameters restrict supported_input_symbol_types to only [integer,integer_sequence].",
+		"The synthetic task needs a string. supported_input_symbol_types is [integer,integer_sequence]. The string type is not available as an input symbol in this pipeline configuration.",
+	} {
+		got := DescribeFailure(errors.New(diagnostic))
+		require.Equal(t, "unsupported_input_format", got.Code)
+		require.Equal(t, "设计题意与约束", got.Stage)
+		require.Contains(t, got.Reason, "当时支持范围")
+		require.Equal(t, diagnostic, got.TechnicalDetails)
+		original := &domain.GenerationFailure{Code: "quality_review_required", BlockedGate: "spec_lint", Message: "合成旧分类", TechnicalDetails: diagnostic}
+		require.Equal(t, got.Code, EnrichFailure(original).Code)
+		require.Equal(t, "quality_review_required", original.Code)
+		require.Equal(t, diagnostic, original.TechnicalDetails)
+	}
+	got := DescribeFailure(errors.New(`parsing authoring-plan response: unknown field "supported_input_symbol_types restrict to only integer"`))
+	require.Equal(t, "model_output_invalid", got.Code, "malformed JSON remains a formatter failure")
+}
