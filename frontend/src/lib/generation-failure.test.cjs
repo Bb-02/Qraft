@@ -258,3 +258,51 @@ test('each known structured quality gate has a readable classification and stage
     assert.match(summary.suggestion, /重新生成/);
   }
 });
+
+test('test data format, empty generator output and rejected execution budgets have distinct actions', () => {
+  const cases = [
+    ['verification_unavailable', 'sandbox HTTP 400 (invalid_request): declared batch output budget exceeds 12345 bytes', '执行请求超过服务限制', '提交程序执行请求', /批次划分/],
+    ['generation_failed', 'remote generator execution failed closed: generator case 3 produced empty input', '测试数据生成器输出为空', '生成测试数据', /每个用例编号/],
+    ['verification_failed', 'parsing test data response: model response is not a complete JSON object', '模型输出格式错误', '生成测试数据', /结构化输出/],
+    ['verification_failed', 'test-data JSON format is still invalid after one correction (type: TestDataFormatError)', '模型输出格式错误', '生成测试数据', /格式纠正后仍失败/],
+  ];
+  for (const [code, technical, category, stage, suggestion] of cases) {
+    const failure = { code, message: '合成旧分类：检查执行服务', suggestion: '检查 worker 和服务连接', technical_details: technical };
+    const summary = failures.generationFailureSummary('', failure, 'set', 'incomplete');
+    assert.equal(summary.category, category);
+    assert.equal(summary.stage, stage);
+    assert.match(summary.suggestion, suggestion);
+    assert.equal(summary.technicalDetails, technical);
+    assert.doesNotMatch(summary.message, /旧分类/);
+    assert.doesNotMatch(summary.suggestion, /worker|人工|提高难度/);
+    assert.equal(summary.retryable, false);
+    const html = renderSlot({ ...slot, status: 'failed', regenerate: true, failure, error: '' });
+    assert.match(html, /需要重新生成/);
+    assert.doesNotMatch(html, /人工审核并恢复原题位|检查 worker/);
+  }
+  for (const keyword of ['sandbox HTTP 401 unauthorized', 'sandbox HTTP 400 (invalid_request): declared batch output budget exceeds 12345 bytes', 'generator case 3 produced empty input', 'max_tokens']) {
+    const summary = failures.generationFailureSummary('parsing test data response: unknown field "' + keyword + '"');
+    assert.equal(summary.category, '模型输出格式错误');
+    assert.equal(summary.stage, '生成测试数据');
+    assert.doesNotMatch(summary.reason, /截断/);
+  }
+  const truncated = failures.generationFailureSummary('test-data response was truncated (type: TestDataTruncatedError)');
+  assert.equal(truncated.stage, '生成测试数据');
+  assert.match(truncated.reason, /截断/);
+  assert.doesNotMatch(failures.generationFailureSummary('TestDataFormatError: not a complete JSON object').reason, /截断/);
+});
+
+test('presentation wording failures identify the statement stage and keep parser failures separate', () => {
+  const raw = 'narrative contains normative or meta term "合成规范词"';
+  const summary = failures.generationFailureSummary(raw, undefined, 'set', 'incomplete');
+  assert.equal(summary.category, '题面表达检查未通过');
+  assert.equal(summary.stage, '编写题面');
+  assert.match(summary.reason, /「合成规范词」/);
+  assert.match(summary.reason, /不表示题意、算法或目标难度有误/);
+  assert.match(summary.suggestion, /过严的表达检查/);
+  assert.doesNotMatch(summary.suggestion, /人工|提高难度/);
+  assert.equal(summary.technicalDetails, raw);
+  const parse = failures.generationFailureSummary('parse statement narrative response: unknown field "narrative contains normative or meta term"');
+  assert.equal(parse.category, '模型输出格式错误');
+  assert.equal(parse.stage, '编写题面');
+});

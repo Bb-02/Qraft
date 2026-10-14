@@ -137,7 +137,25 @@ func authoringLintIssueExplanationV3(issue speccontract.LintIssueV1) string {
 		}
 		return "数据结构类型与方向、环、连通性、计数变量或集合大小关系不一致"
 	case speccontract.CodeSpecBoundaryFactMissing:
-		return "缺少必要的边界事实：至少五项；zero_one_required 必须分别说明零和一是否允许"
+		switch {
+		case strings.Contains(message, "at least five high-risk boundary facts"):
+			return "题目设计缺少至少五项独立、有意义的高风险边界事实"
+		case strings.HasPrefix(message, "symbol ") && strings.HasSuffix(message, " requires at least one explicit boundary fact"):
+			symbol := strings.TrimSuffix(strings.TrimPrefix(message, "symbol "), " requires at least one explicit boundary fact")
+			return "变量 " + symbol + " 至少需要一项明确的边界事实"
+		case strings.HasPrefix(message, "symbol ") && strings.HasSuffix(message, " requires an explicit 0 boundary fact"):
+			symbol := strings.TrimSuffix(strings.TrimPrefix(message, "symbol "), " requires an explicit 0 boundary fact")
+			return "变量 " + symbol + " 缺少取值为零的边界事实，需要说明零是否允许"
+		case strings.HasPrefix(message, "symbol ") && strings.HasSuffix(message, " requires an explicit 1 boundary fact"):
+			symbol := strings.TrimSuffix(strings.TrimPrefix(message, "symbol "), " requires an explicit 1 boundary fact")
+			return "变量 " + symbol + " 缺少取值为一的边界事实，需要说明一是否允许"
+		case strings.Contains(message, "boundary id is required"):
+			return "边界事实缺少标识"
+		case strings.Contains(message, "boundary meaning is required"):
+			return "边界事实缺少用途或语义说明"
+		default:
+			return "必要的边界事实尚未完整声明，请核对对应变量与字段"
+		}
 	case speccontract.CodeSpecBoundaryFactConflict:
 		switch {
 		case strings.Contains(message, "measure"):

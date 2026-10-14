@@ -26,6 +26,14 @@ func DescribeFailure(err error) *domain.GenerationFailure {
 		formatted.TechnicalDetails = failure.TechnicalDetails
 		return formatted
 	}
+	if runtime := testDataExecutionFailure(err.Error()); runtime != nil {
+		runtime.TechnicalDetails = failure.TechnicalDetails
+		return runtime
+	}
+	if presentation := statementPresentationFailure(err.Error()); presentation != nil {
+		presentation.TechnicalDetails = failure.TechnicalDetails
+		return presentation
+	}
 	if unsupported := unsupportedInputFailure(err.Error()); unsupported != nil {
 		unsupported.TechnicalDetails = failure.TechnicalDetails
 		return unsupported

@@ -28,6 +28,8 @@ const FAILURE_CATEGORY_LABELS: Record<string, string> = {
   model_rate_limit: '模型额度或限流', service_timeout: '服务响应超时', compile_failed: '参考程序编译错误',
   duplicate_candidate: '题目内容重复', quality_review_required: '自动质量检查未通过', spec_lint_failed: '题意与约束检查未通过', verification_failed: '答案或数据验证问题',
   verification_unavailable: '执行服务连接问题', invalid_difficulty: '生成参数问题',
+  verification_request_limit: '执行请求超过服务限制', testdata_generator_empty_output: '测试数据生成器输出为空',
+  statement_presentation_rejected: '题面表达检查未通过',
 };
 
 const QUALITY_GATE_FAILURES: Record<string, { category: string; stage: string; reason: string }> = {
@@ -74,8 +76,45 @@ export function generationFailureSummary(error: string, failure?: GenerationFail
   const blockingReasons = failure?.blocking_issues?.filter(issue => /[\u3400-\u9fff]/.test(issue)).map(issue => issue.trim()).filter(Boolean);
   const authoringFormat = /pars(?:e|ing).*authoring[-_ ]plan response|authoring[-_ ]plan.*(?:unmarshal|invalid json|schema)|InvalidAuthoringPlanResponse|AuthoringPlan(?:Format|Truncated)Error/i.test(evidence);
   const reviewerFormat = /Reviewer(?:Format|Truncated)Error|decode (?:strict reviewer|review assessment)/i.test(evidence);
+  const testDataFormat = /parsing test[-_ ]?data response|TestData(?:Format|Truncated)Error|test[- ]data response was truncated|test-data JSON format is still invalid after one correction/i.test(evidence);
+  const statementFormat = /parse statement narrative response/i.test(evidence);
+  const requestLimit = failure?.code === 'verification_request_limit' || /sandbox HTTP\s+(?:400|413)\s+\(invalid_request\):\s*(?:declared batch output budget exceeds \d+ bytes|combined inputs exceed \d+ bytes|input \d+ exceeds \d+ bytes|source exceeds \d+ bytes)/i.test(evidence);
+  const emptyGenerator = failure?.code === 'testdata_generator_empty_output' || /generator case \d+ produced empty input/i.test(evidence);
+  const presentationRejected = failure?.code === 'statement_presentation_rejected' || /(?:title|narrative) (?:contains normative or meta term|must not introduce normative operators)/i.test(evidence);
 
-  if (gateFailure) {
+  if (testDataFormat || statementFormat) {
+    const model = testDataFormat ? '测试数据模型' : '题面模型';
+    const structure = testDataFormat ? '测试用例或生成器' : '标题或叙述';
+    category = '模型输出格式错误'; stage = testDataFormat ? '生成测试数据' : '编写题面';
+    message = model + '的回复不符合所需格式。';
+    reason = model + '没有返回约定的完整 JSON 对象，' + structure + '尚未形成有效数据。';
+    if (/TestDataTruncatedError|test[- ]data response was truncated|stop_reason\s*=\s*length/i.test(evidence)) reason = '模型输出在结束前被截断，系统无法得到完整的测试数据与生成器结构。';
+    else if (/cannot unmarshal|type mismatch|expected.*(?:string|array|object|scalar)/i.test(evidence)) reason = model + '把字段写成了另一种类型，系统无法读取' + structure + '。';
+    else if (/unknown (?:field|or non-canonical)|unrecognized field/i.test(evidence)) reason = model + '使用了当前格式不接受的字段名，系统无法读取' + structure + '。';
+    else if (/invalid character|invalid json|not a complete json object|unexpected end|unexpected eof/i.test(evidence)) reason = model + '没有返回单个完整、合法的 JSON 对象，可能混入额外文字、缺少引号或括号。';
+    suggestion = '检查' + model + '的结构化输出能力。格式纠正后仍失败时，换用更稳定的模型或精简输出后重试未完成题目；无需修改目标难度。';
+    retryable ??= false;
+  } else if (requestLimit) {
+    category = '执行请求超过服务限制'; stage = '提交程序执行请求';
+    message = '出题流程提交的执行请求超过服务限制。';
+    reason = /declared batch output budget/i.test(evidence) ? '单批测试数量与每例输出额度合计超过执行服务的总量限制，服务拒绝了请求，尚未运行这一批程序。' : '提交的程序或数据量超过执行服务允许的请求范围，服务已拒绝本次提交，尚未完成程序执行。';
+    suggestion = '管理员需修正出题流程的执行批次划分、数据规模或输出额度，让请求落在服务限制内，再重试未完成题目；无需修改目标难度。';
+    retryable ??= false;
+  } else if (emptyGenerator) {
+    category = '测试数据生成器输出为空'; stage = '生成测试数据';
+    message = '测试数据生成器没有输出有效输入。';
+    reason = '某个用例的生成器执行后返回了空白数据，系统无法取得完整输入，测试数据尚未生成成功。';
+    suggestion = '检查生成器是否对每个用例编号都输出完整输入，修复提前退出或遗漏的分支后重新生成此题。';
+    retryable ??= false;
+  } else if (presentationRejected) {
+    category = '题面表达检查未通过'; stage = '编写题面';
+    message = '题面叙述与当前表达检查规则冲突。';
+    reason = '题目标题或叙述触发了当前表现层的用语限制，题面检查未通过；这项结果不表示题意、算法或目标难度有误。';
+    const term = evidence.match(/(?:title|narrative) contains normative or meta term "([^"]+)"/i)?.[1];
+    if (term) reason = '题目标题或叙述使用了当前表现层检查禁止的词语「' + term + '」，题面检查未通过；这项结果不表示题意、算法或目标难度有误。';
+    suggestion = '检查标题与叙述，调整表现层文案，或修正过严的表达检查后重试未完成题目；无需修改目标难度。';
+    retryable ??= false;
+  } else if (gateFailure) {
     ({ category, stage, reason } = gateFailure);
     if (blockingReasons?.length) reason = blockingReasons.join('；');
     message = category + '。';
@@ -139,7 +178,8 @@ export function generationFailureSummary(error: string, failure?: GenerationFail
     suggestion = '';
   }
 
-  const generic = failure?.code === 'generation_failed' && !failure.category && !failure.stage && !failure.reason;
+  const legacyClassification = failure && !failure.category && !failure.stage && !failure.reason;
+  const generic = legacyClassification && (failure.code === 'generation_failed' || (testDataFormat || statementFormat || requestLimit || emptyGenerator || presentationRejected) && ['verification_unavailable', 'verification_failed'].includes(failure.code));
   if (!generic && failure?.message?.trim() && /[\u3400-\u9fff]/.test(failure.message) && !/workflow execution|activity error|application error|retryable:/i.test(failure.message)) message = failure.message.trim();
   if (!generic && failure?.suggestion?.trim()) suggestion = failure.suggestion.trim();
   if (failure?.category) category = /[\u3400-\u9fff]/.test(failure.category) ? failure.category.trim() : FAILURE_CATEGORY_LABELS[failure.category] || category;
