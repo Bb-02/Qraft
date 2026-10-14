@@ -64,7 +64,7 @@ func TestProblemGenerationQualityWorkflowV1ProductJobStoresOnlyAfterNineGatePass
 }
 
 func TestProblemGenerationQualityWorkflowV1ProductJobQualityFailureDoesNotStore(t *testing.T) {
-	h := newFixed20Harness(t, 72, fixed20Scenario{whitespaceMismatch: true})
+	h := newFixed20Harness(t, 72, fixed20Scenario{numericMismatch: true})
 	h.input.SubjectID = generationapi.JobIDPrefix + strings.Repeat("8", 64)
 	storeCalls := 0
 	h.env.RegisterActivityWithOptions(

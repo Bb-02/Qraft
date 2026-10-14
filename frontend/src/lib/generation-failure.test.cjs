@@ -246,7 +246,7 @@ test('old and enriched spec lint failures explain constraints and prevent manual
 
 test('each known structured quality gate has a readable classification and stage', () => {
   const gates = {
-    spec_lint: '设计题意与约束', sample_output_binding: '核对样例输出', oracle_differential: '比对参考答案',
+    spec_lint: '设计题意与约束', sample_output_binding: '核对样例输出', oracle_differential: '独立解法验证',
     sanitizer: '检查程序运行错误', boundary_coverage: '检查测试数据覆盖', test_manifest: '检查测试数据与题目文件',
     reviewer_schema_verdict: '自动评审题目', dedup: '检查题目重复', hidden_regression: '运行额外验证',
   };
@@ -305,4 +305,24 @@ test('presentation wording failures identify the statement stage and keep parser
   const parse = failures.generationFailureSummary('parse statement narrative response: unknown field "narrative contains normative or meta term"');
   assert.equal(parse.category, '模型输出格式错误');
   assert.equal(parse.stage, '编写题面');
+});
+
+test('structured oracle identity failures do not invent an output mismatch or manual approval path', () => {
+  const failure = { code: 'oracle_identity_not_independent', blocked_gate: 'oracle_differential', message: '独立校验未满足模型与来源独立性要求', reason: '两路实际返回相同模型，即使测试输出一致，也未满足当前规则。', technical_details: 'synthetic same-returned-model decision' };
+  const summary = failures.generationFailureSummary('', failure, 'set', 'incomplete');
+  assert.equal(summary.category, '验证来源不够独立');
+  assert.equal(summary.stage, '独立解法验证');
+  assert.equal(summary.reason, failure.reason);
+  assert.match(summary.suggestion, /第二个实际不同的模型和服务地址/);
+  assert.doesNotMatch(summary.suggestion, /人工|输出.*不一致/);
+  const html = renderSlot({ ...slot, status: 'failed', regenerate: true, failure, error: '' });
+  assert.match(html, /验证来源不够独立/);
+  assert.doesNotMatch(html, /人工审核并恢复原题位|参考程序的输出.*不一致/);
+  const historical = failures.generationFailureSummary('', { code: 'quality_review_required', blocked_gate: 'oracle_differential', message: '合成旧检查', technical_details: 'oracle.promotion_failed' }, 'set', 'incomplete');
+  assert.equal(historical.category, '独立解法验证未通过');
+  assert.doesNotMatch(historical.reason, /两路实际返回相同模型/);
+  const judging = failures.generationFailureSummary('unsupported oracle judge contract: mode special_judge, comparison profile synthetic');
+  assert.equal(judging.category, '流程能力限制');
+  assert.match(judging.reason, /不能用普通输出比较代替/);
+  assert.doesNotMatch(judging.suggestion, /人工/);
 });

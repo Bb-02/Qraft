@@ -314,7 +314,10 @@ func ValidateAndPromoteOracleCandidateV1(in ValidateOraclePromotionInputV1) (*Or
 		if independence != nil {
 			reason = independence.Reason
 		}
-		return fail("oracle candidate is correlated: %s", reason)
+		return nil, temporal.NewNonRetryableApplicationError(
+			fmt.Sprintf("oracle candidate is correlated: %s", reason), "QualityNotMet",
+			&oracleIdentityNotIndependentErrorV1{Receipt: independence},
+		)
 	}
 	return &OraclePromotionReceiptV1{
 		SchemaVersion: OraclePromotionSchemaV1, SemanticSpecSHA256: in.ExpectedSemanticSpecSHA256,

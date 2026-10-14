@@ -499,6 +499,11 @@ func runProblemQualityRevisionV1(ctx, activityCtx workflow.Context, root Problem
 	addProblemQualityAssetV1(baseAssets, "main_solution", mainRef)
 	if oracleGate.Gate.Status != qualitygate.GateStatusPass || oracle.CandidateSourceArtifact == nil || oracleGate.VerifiedProgramReceiptArtifact == nil || oracleGate.ReceiptArtifact == nil || oracleGate.MainRun == nil {
 		out := quarantine(qualitygate.GateOracleDifferential, main.CandidateSourceSHA256, false, false, nil, &mainRef)
+		if oracleGate.Failure != nil {
+			copy := *oracleGate.Failure
+			copy.BlockingIssues = append([]string(nil), oracleGate.Failure.BlockingIssues...)
+			out.result.Failure = &copy
+		}
 		out.blockers, out.assets = oracleGate.Gate.Blockers, baseAssets
 		return out, nil
 	}

@@ -703,10 +703,13 @@ type S3OracleGateReceiptV1 struct {
 	MainRunSHA256       string                    `json:"main_run_sha256,omitempty"`
 	OracleRunSHA256     string                    `json:"oracle_run_sha256,omitempty"`
 	SandboxIdentity     SandboxAuditMetadata      `json:"sandbox_identity"`
+	JudgeMode           string                    `json:"judge_mode,omitempty"`
+	ComparisonProfile   string                    `json:"comparison_profile,omitempty"`
 	MainBatches         []SandboxExecutionBatch   `json:"main_batches,omitempty"`
 	OracleBatches       []SandboxExecutionBatch   `json:"oracle_batches,omitempty"`
 	FirstMismatchCaseID string                    `json:"first_mismatch_case_id,omitempty"`
 	Promotion           *OraclePromotionReceiptV1 `json:"promotion,omitempty"`
+	ValidationReason    string                    `json:"validation_reason,omitempty"`
 }
 
 type S3OracleGateResultV1 struct {
@@ -718,11 +721,12 @@ type S3OracleGateResultV1 struct {
 	VerifiedProgramReceiptArtifact *ArtifactRef               `json:"verified_program_receipt_artifact,omitempty"`
 	MainRun                        *SandboxResult             `json:"main_run,omitempty"`
 	OracleRun                      *SandboxResult             `json:"oracle_run,omitempty"`
+	Failure                        *domain.GenerationFailure  `json:"failure,omitempty"`
 }
 
 // VerifyProgramAgainstIndependentOracleActivityV1 is the only producer of the
 // verified-program receipt consumed by QG-03. It runs both CAS-bound programs
-// in the server sandbox, performs byte-exact differential comparison, enforces
+// in the server sandbox, compares under the frozen SemanticSpec judge, enforces
 // provider independence, and only then signs the receipt.
 func (a *Activities) VerifyProgramAgainstIndependentOracleActivityV1(ctx context.Context, in S3OracleGateInputV1) (*S3OracleGateResultV1, error) {
 	if in.PayloadVersion != S3QualityPayloadVersionV1 || !isManifestSHA256(in.ExpectedSemanticSpecSHA256) || in.Limits.TimeLimitMs <= 0 || in.Limits.MemoryLimitMB <= 0 {
@@ -730,6 +734,10 @@ func (a *Activities) VerifyProgramAgainstIndependentOracleActivityV1(ctx context
 	}
 	if in.MainCandidate.SchemaVersion != GenerateMainSolutionSchemaV1 || in.MainCandidate.SemanticSpecSHA256 != in.ExpectedSemanticSpecSHA256 || in.MainCandidate.CandidateSourceArtifact == nil || in.MainCandidate.CandidateSourceArtifact.Producer != "GenerateMainSolutionActivityV1" || in.MainCandidate.ProviderResponseArtifact == nil || in.MainCandidate.ProviderResponseArtifact.LLMCallReceipt == nil || in.OracleCandidate.CandidateSourceArtifact == nil || in.OracleCandidate.CandidateSourceArtifact.Producer != "GenerateOracleCandidateActivityV1" || in.OracleCandidate.SourceBinding.SemanticSpecSHA256 != in.ExpectedSemanticSpecSHA256 {
 		return nil, s3ContractErrorV1("main/oracle candidate binding is incomplete")
+	}
+	comparison, err := a.loadS3OracleComparisonV2(ctx, in)
+	if err != nil {
+		return nil, s3ContractErrorV1("oracle output comparison contract: %v", err)
 	}
 	casePlan, _, err := a.loadS3CasePlanV1(ctx, in.CasePlanArtifact)
 	if err != nil {
@@ -804,7 +812,7 @@ func (a *Activities) VerifyProgramAgainstIndependentOracleActivityV1(ctx context
 	}
 	mismatches := make([]OracleDifferentialMismatchV1, 0)
 	for index := range caseIDs {
-		if mainOutputs[index] != oracleOutputs[index] {
+		if !comparison.equal(mainOutputs[index], oracleOutputs[index]) {
 			mismatches = append(mismatches, OracleDifferentialMismatchV1{CaseID: caseIDs[index], MainOutputSHA256: sha256Hex([]byte(mainOutputs[index])), OracleOutputSHA256: sha256Hex([]byte(oracleOutputs[index]))})
 		}
 	}
@@ -829,8 +837,10 @@ func (a *Activities) VerifyProgramAgainstIndependentOracleActivityV1(ctx context
 		CandidateSHA256:     in.MainCandidate.CandidateSourceSHA256,
 		DifferentialCaseIDs: caseIDs, OrderedInputSHA256: inputSHA,
 		MainRunSHA256: mainRunSHA, OracleRunSHA256: oracleRunSHA, SandboxIdentity: mainIdentity,
+		JudgeMode: comparison.JudgeMode, ComparisonProfile: comparison.ComparisonProfile,
 		MainBatches: mainRun.Batches, OracleBatches: oracleRun.Batches,
 		FirstMismatchCaseID: firstMismatch, Promotion: receipt,
+		ValidationReason: boundedOracleValidationReasonV1(validationErr),
 	}
 	encoded, err := json.Marshal(gateReceipt)
 	if err != nil {
@@ -848,7 +858,7 @@ func (a *Activities) VerifyProgramAgainstIndependentOracleActivityV1(ctx context
 			fixture = firstMismatch
 		}
 		blockers = []qualitygate.ReviewBlockerV1{s3BlockerV1(code, s3ArtifactRefURI(in.MainCandidate.CandidateSourceArtifact), "algoforge.oracle-promotion.v1", fixture, "candidate must compile, be independent, and match the oracle on every differential case")}
-		return &S3OracleGateResultV1{PayloadVersion: S3QualityPayloadVersionV1, Gate: qualitygate.GateEvidenceV1{Status: status, Evidence: asset, Blockers: blockers}, ReceiptSHA256: ref.SHA256, ReceiptArtifact: ref, MainRun: mainRun, OracleRun: oracleRun}, nil
+		return &S3OracleGateResultV1{PayloadVersion: S3QualityPayloadVersionV1, Gate: qualitygate.GateEvidenceV1{Status: status, Evidence: asset, Blockers: blockers}, ReceiptSHA256: ref.SHA256, ReceiptArtifact: ref, MainRun: mainRun, OracleRun: oracleRun, Failure: oraclePromotionFailureV1(validationErr)}, nil
 	}
 	verified := VerifiedProgramReceiptV1{SchemaVersion: VerifiedProgramReceiptSchemaV1, Status: VerifiedProgramReceiptStatusV1, ProgramSHA256: in.MainCandidate.CandidateSourceSHA256, IndependentOracleReceiptSHA256: ref.SHA256, SandboxImageDigest: mainIdentity.ImageDigest, ToolchainManifestDigest: mainIdentity.ToolchainManifestDigest, SeccompPolicyDigest: mainIdentity.SeccompPolicyDigest, LimitProfile: mainIdentity.LimitProfile}
 	if err := validateVerifiedProgramReceiptV1(verified); err != nil {
@@ -1229,6 +1239,9 @@ func (a *Activities) BuildS3TestManifestActivityV1(ctx context.Context, in S3Man
 	var oracleReceipt S3OracleGateReceiptV1
 	if err := decodeCanonicalSampleClosureJSONV1(oracleBytes, &oracleReceipt); err != nil || oracleReceipt.Status != qualitygate.GateStatusPass || oracleReceipt.Promotion == nil || !oracleReceipt.Promotion.Promoted || oracleReceipt.SemanticSpecSHA256 != in.SemanticSpecArtifact.SHA256 {
 		return nil, s3ContractErrorV1("oracle receipt is not a canonical promoted server result")
+	}
+	if err := validateS3OracleReceiptComparisonV2(specValue, oracleReceipt.JudgeMode, oracleReceipt.ComparisonProfile); err != nil {
+		return nil, s3ContractErrorV1("oracle receipt comparison contract: %v", err)
 	}
 	if len(oracleReceipt.DifferentialCaseIDs) != len(casePlan.Cases) || len(oracleReceipt.OrderedInputSHA256) != len(casePlan.Cases) {
 		return nil, s3ContractErrorV1("oracle receipt case lineage count differs from the D-side case plan")

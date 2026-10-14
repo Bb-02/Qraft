@@ -98,7 +98,7 @@ func TestProblemSetQualityRetainsCompleteRejectedCandidateAndOriginalAudit(t *te
 }
 
 func TestProblemSetEarlyVerificationFailureRetainsPartialAssetsForRegeneration(t *testing.T) {
-	h := newFixed20Harness(t, 83, fixed20Scenario{whitespaceMismatch: true})
+	h := newFixed20Harness(t, 83, fixed20Scenario{numericMismatch: true})
 	setTrainingProductInput(h, 1000)
 	stored := 0
 	h.env.RegisterActivityWithOptions(func(_ context.Context, input activities.StoreS3ReviewCandidateInputV1) (*activities.StoreS3QualityDraftResultV1, error) {

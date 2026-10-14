@@ -36,6 +36,12 @@ func EnrichFailure(failure *domain.GenerationFailure) *domain.GenerationFailure 
 
 func unsupportedInputFailure(diagnostic string) *domain.GenerationFailure {
 	text := strings.ToLower(diagnostic)
+	if strings.Contains(text, "unsupported oracle judge contract") || strings.Contains(text, "a special checker cannot use ordinary output comparison") {
+		retryable := false
+		return &domain.GenerationFailure{Code: "unsupported_judge_contract", Category: "流程能力限制", Stage: "独立解法验证", Message: "当前验证流程不支持这道题的判题方式",
+			Reason:     "该题的判题规则需要尚未支持的比较方式或专用检查器，不能用普通输出比较代替。",
+			Suggestion: "核对题目的实际判题规则；需要专用检查器或其他比较方式时，应先补齐对应验证能力，再重试未完成题目。", Retryable: &retryable}
+	}
 	declaredInputSupport := strings.HasPrefix(text, "supportedinput") || strings.Contains(text, " supportedinput") || strings.HasPrefix(text, "supported input") || strings.Contains(text, " supported input") || strings.Contains(text, "supported_input_symbol_types")
 	if (strings.Contains(text, "current pipeline") || strings.Contains(text, "current authoring pipeline") || declaredInputSupport) &&
 		(strings.Contains(text, "unsupported") || strings.Contains(text, "only support") || strings.Contains(text, "supports only") || strings.Contains(text, "not support") || strings.Contains(text, "limited to") ||

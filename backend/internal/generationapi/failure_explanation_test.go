@@ -80,3 +80,15 @@ func TestDeclaredInputSymbolRestrictionIsExplainedAsHistoricalPipelineCapability
 	got := DescribeFailure(errors.New(`parsing authoring-plan response: unknown field "supported_input_symbol_types restrict to only integer"`))
 	require.Equal(t, "model_output_invalid", got.Code, "malformed JSON remains a formatter failure")
 }
+
+func TestUnsupportedOracleJudgeContractDoesNotBlameProgramOutputs(t *testing.T) {
+	for _, diagnostic := range []string{"unsupported oracle judge contract: mode special_judge, comparison profile synthetic", "a special checker cannot use ordinary output comparison"} {
+		got := DescribeFailure(errors.New(diagnostic))
+		require.Equal(t, "unsupported_judge_contract", got.Code)
+		require.Equal(t, "独立解法验证", got.Stage)
+		require.Contains(t, got.Reason, "不能用普通输出比较代替")
+		require.NotContains(t, got.Suggestion, "人工")
+	}
+	got := DescribeFailure(errors.New(`parsing authoring-plan response: unknown field "unsupported oracle judge contract"`))
+	require.Equal(t, "model_output_invalid", got.Code)
+}

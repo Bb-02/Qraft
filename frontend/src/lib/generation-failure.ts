@@ -30,12 +30,14 @@ const FAILURE_CATEGORY_LABELS: Record<string, string> = {
   verification_unavailable: '执行服务连接问题', invalid_difficulty: '生成参数问题',
   verification_request_limit: '执行请求超过服务限制', testdata_generator_empty_output: '测试数据生成器输出为空',
   statement_presentation_rejected: '题面表达检查未通过',
+  oracle_identity_not_independent: '验证来源不够独立',
+  unsupported_judge_contract: '流程能力限制',
 };
 
 const QUALITY_GATE_FAILURES: Record<string, { category: string; stage: string; reason: string }> = {
   spec_lint: { category: '题意与约束检查未通过', stage: '设计题意与约束', reason: '结构化题意、变量范围或约束关联尚未通过一致性检查。' },
   sample_output_binding: { category: '样例输出检查未通过', stage: '核对样例输出', reason: '样例、题面与参考程序的输出尚未核对一致。' },
-  oracle_differential: { category: '参考答案对比未通过', stage: '比对参考答案', reason: '参考程序与独立校验程序的结果尚未核对一致。' },
+  oracle_differential: { category: '独立解法验证未通过', stage: '独立解法验证', reason: '参考解法对比或验证来源独立性尚未通过，请结合具体报告核对；这个状态本身不表示输出一定不一致。' },
   sanitizer: { category: '参考程序运行检查未通过', stage: '检查程序运行错误', reason: '参考程序尚未通过运行与内存安全检查，需要核对程序和失败用例。' },
   boundary_coverage: { category: '测试数据覆盖检查未通过', stage: '检查测试数据覆盖', reason: '测试数据的边界或特殊情况覆盖尚未通过检查。' },
   test_manifest: { category: '测试数据完整性检查未通过', stage: '检查测试数据与题目文件', reason: '测试数据清单及文件的完整性尚未通过校验。' },
@@ -81,8 +83,15 @@ export function generationFailureSummary(error: string, failure?: GenerationFail
   const requestLimit = failure?.code === 'verification_request_limit' || /sandbox HTTP\s+(?:400|413)\s+\(invalid_request\):\s*(?:declared batch output budget exceeds \d+ bytes|combined inputs exceed \d+ bytes|input \d+ exceeds \d+ bytes|source exceeds \d+ bytes)/i.test(evidence);
   const emptyGenerator = failure?.code === 'testdata_generator_empty_output' || /generator case \d+ produced empty input/i.test(evidence);
   const presentationRejected = failure?.code === 'statement_presentation_rejected' || /(?:title|narrative) (?:contains normative or meta term|must not introduce normative operators)/i.test(evidence);
+  const unsupportedJudge = failure?.code === 'unsupported_judge_contract' || /unsupported oracle judge contract|a special checker cannot use ordinary output comparison/i.test(evidence);
 
-  if (testDataFormat || statementFormat) {
+  if (failure?.code === 'oracle_identity_not_independent') {
+    category = '验证来源不够独立'; stage = '独立解法验证';
+    message = '独立校验未满足模型与来源独立性要求。';
+    reason = '两路验证来源尚未满足当前独立性规则，测试输出一致不能代替这项要求。';
+    suggestion = '在模型配置中为独立验证设置第二个实际不同的模型和服务地址，再重试未完成题目。';
+    retryable ??= false;
+  } else if (testDataFormat || statementFormat) {
     const model = testDataFormat ? '测试数据模型' : '题面模型';
     const structure = testDataFormat ? '测试用例或生成器' : '标题或叙述';
     category = '模型输出格式错误'; stage = testDataFormat ? '生成测试数据' : '编写题面';
@@ -105,6 +114,12 @@ export function generationFailureSummary(error: string, failure?: GenerationFail
     message = '测试数据生成器没有输出有效输入。';
     reason = '某个用例的生成器执行后返回了空白数据，系统无法取得完整输入，测试数据尚未生成成功。';
     suggestion = '检查生成器是否对每个用例编号都输出完整输入，修复提前退出或遗漏的分支后重新生成此题。';
+    retryable ??= false;
+  } else if (unsupportedJudge && !authoringFormat && !reviewerFormat) {
+    category = '流程能力限制'; stage = '独立解法验证';
+    message = '当前验证流程不支持这道题的判题方式。';
+    reason = '该题的判题规则需要尚未支持的比较方式或专用检查器，不能用普通输出比较代替。';
+    suggestion = '核对题目的实际判题规则；需要专用检查器或其他比较方式时，应先补齐对应验证能力，再重试未完成题目。';
     retryable ??= false;
   } else if (presentationRejected) {
     category = '题面表达检查未通过'; stage = '编写题面';
@@ -179,7 +194,7 @@ export function generationFailureSummary(error: string, failure?: GenerationFail
   }
 
   const legacyClassification = failure && !failure.category && !failure.stage && !failure.reason;
-  const generic = legacyClassification && (failure.code === 'generation_failed' || (testDataFormat || statementFormat || requestLimit || emptyGenerator || presentationRejected) && ['verification_unavailable', 'verification_failed'].includes(failure.code));
+  const generic = legacyClassification && (failure.code === 'generation_failed' || (testDataFormat || statementFormat || requestLimit || emptyGenerator || presentationRejected || unsupportedJudge) && ['verification_unavailable', 'verification_failed'].includes(failure.code));
   if (!generic && failure?.message?.trim() && /[\u3400-\u9fff]/.test(failure.message) && !/workflow execution|activity error|application error|retryable:/i.test(failure.message)) message = failure.message.trim();
   if (!generic && failure?.suggestion?.trim()) suggestion = failure.suggestion.trim();
   if (failure?.category) category = /[\u3400-\u9fff]/.test(failure.category) ? failure.category.trim() : FAILURE_CATEGORY_LABELS[failure.category] || category;

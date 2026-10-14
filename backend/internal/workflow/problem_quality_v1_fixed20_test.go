@@ -365,6 +365,7 @@ type fixed20Sandbox struct {
 	compileFailure     bool
 	runtimeFailure     bool
 	whitespaceMismatch bool
+	numericMismatch    bool
 	mutateReparse      bool
 	mainRuns           int
 	limits             []remotesandbox.RemoteLimits
@@ -397,7 +398,13 @@ func (s *fixed20Sandbox) Execute(_ context.Context, language, source string, inp
 		if err != nil {
 			return nil, err
 		}
-		if (s.whitespaceMismatch && isMain) || strings.Contains(source, "AF-WRONG") {
+		if (s.numericMismatch && isMain) || strings.Contains(source, "AF-WRONG") {
+			var expected int64
+			if _, err := fmt.Sscan(output, &expected); err != nil {
+				return nil, err
+			}
+			output = fmt.Sprintf("%d \n", expected+1)
+		} else if s.whitespaceMismatch && isMain {
 			output = strings.TrimSuffix(output, " \n") + "\n"
 		}
 		if s.mutateReparse && isMain && s.mainRuns == 3 {
@@ -607,6 +614,7 @@ type fixed20Scenario struct {
 	compileFailure     bool
 	runtimeFailure     bool
 	whitespaceMismatch bool
+	numericMismatch    bool
 	mutateReparse      bool
 }
 
@@ -663,6 +671,7 @@ func newFixed20HarnessWithOptions(t *testing.T, index int, scenario fixed20Scena
 		compileFailure:     scenario.compileFailure,
 		runtimeFailure:     scenario.runtimeFailure,
 		whitespaceMismatch: scenario.whitespaceMismatch,
+		numericMismatch:    scenario.numericMismatch,
 		mutateReparse:      scenario.mutateReparse,
 	}
 	hidden := &fixed20HiddenExecutor{}
@@ -834,10 +843,51 @@ func TestProblemGenerationQualityWorkflowV1Fixed20UsesSourceActivities(t *testin
 	}
 }
 
+func TestProblemGenerationQualityWorkflowV1UsesFrozenNormalizedJudgeWithoutChangingSampleBytes(t *testing.T) {
+	h := newFixed20Harness(t, 61, fixed20Scenario{whitespaceMismatch: true})
+	result, err := h.execute(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Decision != qualitygate.DecisionPass || !result.ReviewerInvoked {
+		t.Fatalf("outputs equal under the frozen judge were rejected: %+v", result)
+	}
+	oracleRefs := h.store.refsForArtifactType("qg04_oracle_gate_receipt")
+	if len(oracleRefs) != 1 {
+		t.Fatalf("oracle receipts=%d want=1", len(oracleRefs))
+	}
+	data, err := h.store.Get(context.Background(), oracleRefs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var oracle activities.S3OracleGateReceiptV1
+	if err := json.Unmarshal(data, &oracle); err != nil || oracle.JudgeMode != domain.SemanticJudgeExactNormalized || oracle.ComparisonProfile != domain.SemanticComparisonTrimTrailingSpaceLFV1 {
+		t.Fatalf("receipt omitted the actual bound judge: %+v err=%v", oracle, err)
+	}
+	finalRefs := h.store.refsForArtifactType("qg03_final_statement_samples")
+	if len(finalRefs) != 1 {
+		t.Fatalf("final sample bundles=%d want=1", len(finalRefs))
+	}
+	data, err = h.store.Get(context.Background(), finalRefs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var final activities.FinalAuthoringStatementSamplesBundleV1
+	if err := json.Unmarshal(data, &final); err != nil {
+		t.Fatal(err)
+	}
+	for _, sample := range final.Samples {
+		digest := sha256.Sum256([]byte(sample.Output))
+		if !strings.HasSuffix(sample.Output, "\n") || strings.HasSuffix(sample.Output, " \n") || sample.OutputSHA256 != hex.EncodeToString(digest[:]) {
+			t.Fatalf("main-program sample bytes were changed by judge normalization: %+v", sample)
+		}
+	}
+}
+
 func TestProblemGenerationQualityWorkflowV1DefectReplayStopsBeforeReviewer(t *testing.T) {
 	var firstReceiptSHA string
 	for replay := 0; replay < 2; replay++ {
-		h := newFixed20Harness(t, 31, fixed20Scenario{whitespaceMismatch: true})
+		h := newFixed20Harness(t, 31, fixed20Scenario{numericMismatch: true})
 		result, err := h.execute(t)
 		if err != nil {
 			t.Fatalf("defect replay %d: %v", replay, err)
