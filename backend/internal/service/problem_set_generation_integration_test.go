@@ -58,6 +58,11 @@ func TestProblemSetPreparationIsolatesInvalidTargetsIntegration(t *testing.T) {
 	require.NoError(t, err)
 	state, err = repo.ReserveGeneration(ctx, set.ID, set.UpdatedAt, state)
 	require.NoError(t, err)
+	require.NoError(t, repo.ChangeGeneration(ctx, domain.ProblemSetGenerationRef{SetID: set.ID, RunID: state.ID}, func(current *domain.ProblemSetGenerationState) error {
+		current.Slots[1].Error = "合成历史字段类型错误"
+		current.Slots[1].Failure = &domain.GenerationFailure{Code: "model_output_invalid", Message: "合成历史字段类型错误"}
+		return nil
+	}))
 	runtime := &domain.LLMRuntimeConfig{Model: "fixture", APIKeyRef: "runtime:synthetic-set", BaseURL: "https://example.test", Provider: "fixture", Protocol: "openai-chat"}
 	svc := NewProblemSetGenerationService(sets, repo, problems, tags, nil, "", func(context.Context) (*domain.ProviderRuntimeConfig, error) {
 		return &domain.ProviderRuntimeConfig{Statement: runtime, Verification: runtime, Review: runtime}, nil
@@ -72,6 +77,9 @@ func TestProblemSetPreparationIsolatesInvalidTargetsIntegration(t *testing.T) {
 	require.Len(t, batch.Slots, 1, "invalid target must not discard the valid neighboring slot")
 	require.Equal(t, 2, batch.Slots[0].Slot.Position)
 	require.Equal(t, 400, batch.Slots[0].Programming.Params.Difficulty)
+	require.Contains(t, batch.Slots[0].Programming.Params.CustomPrompt, "合成历史字段类型错误", "retry must retain corrective feedback in the new request")
+	require.Empty(t, batch.Slots[0].Slot.Error)
+	require.Nil(t, batch.Slots[0].Slot.Failure)
 	require.Equal(t, set.ID, batch.Slots[0].Programming.Params.ProblemSetContext.SetID)
 	require.NoError(t, batch.Slots[0].Programming.Params.Validate())
 	require.Equal(t, []string{"greedy", "simulation"}, batch.Slots[0].Programming.Params.Tags)
@@ -83,6 +91,8 @@ func TestProblemSetPreparationIsolatesInvalidTargetsIntegration(t *testing.T) {
 	require.Contains(t, stored.Generation.Slots[0].Error, "训练目标难度")
 	require.Empty(t, stored.Generation.Slots[0].Brief, "retry must replan invalid slot")
 	require.Equal(t, "ready", stored.Generation.Slots[1].Status)
+	require.Empty(t, stored.Generation.Slots[1].Error, "a new child must not display a historical failure as its current outcome")
+	require.Nil(t, stored.Generation.Slots[1].Failure)
 	require.Equal(t, []string{"simulation", "greedy"}, stored.Generation.Slots[1].Tags, "quality input canonicalization must preserve the stored plan")
 	require.Equal(t, 2, model.calls, "content failure must not regenerate the complete batch")
 }

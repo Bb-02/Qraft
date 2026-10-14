@@ -6,6 +6,7 @@ import GenerationProgressNotice from '@/components/problem-sets/GenerationProgre
 import { SET_QUESTION_TYPES, setGenerationStatusLabel } from '@/lib/problem-set-generation';
 import type { ProblemSetGenerationSlot } from '@/lib/types';
 import { generationProgressTitle } from '@/lib/generation-progress';
+import { generationCandidateState } from '@/lib/generation-failure';
 
 export default function GenerationSlotCard({ slot, isAdmin, busy, connectionUnknown, onReview }: {
   slot: ProblemSetGenerationSlot;
@@ -21,7 +22,7 @@ export default function GenerationSlotCard({ slot, isAdmin, busy, connectionUnkn
     <div className="flex flex-wrap justify-between gap-2"><span>#{slot.position} · {SET_QUESTION_TYPES.find(type => type.type === slot.type)?.label} · {slot.title || '等待规划'}</span><span className={statusTone}>{statusLabel}</span></div>
     {slot.type === 'programming' && <div className="mt-2"><GenerationDifficultyNotice assessment={slot.difficulty_assessment || { target: slot.difficulty }} /></div>}
     {slot.execution && <div className="mt-2"><GenerationProgressNotice progress={connectionUnknown ? { ...slot.execution, state: 'unknown', message: '暂时无法同步这道题的执行状态，正在重新连接。' } : slot.execution} /></div>}
-    {(slot.error || slot.failure) && needsReview && <div className="mt-2 text-danger-600"><GenerationFailureNotice error={slot.error || ''} failure={slot.failure} /></div>}
+    {(slot.error || slot.failure) && needsReview && <div className="mt-2 text-danger-600"><GenerationFailureNotice error={slot.error || ''} failure={slot.failure} candidate={generationCandidateState(slot)} /></div>}
     {slot.regenerate && <p className="mt-2 text-sm text-warning-700">这道候选题需要重新生成，修正需求后重试未完成题目；旧候选仍保留。</p>}
     <div className="mt-2 flex flex-wrap gap-3">
       {slot.problem_id && <Link href={'/problems/' + encodeURIComponent(slot.problem_id)} className="af-link inline-flex items-center gap-1"><ExternalLink size={14} />{slot.status === 'succeeded' ? '查看题目' : '查看和修复候选'}</Link>}

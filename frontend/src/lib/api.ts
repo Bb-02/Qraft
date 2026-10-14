@@ -519,7 +519,7 @@ export async function listTagsByLevel(
 // ---------------------------------------------------------------------------
 
 export async function listWorkflows(
-  params?: { page?: number; size?: number; status?: string; cursor?: string },
+  params?: { page?: number; size?: number; status?: string; cursor?: string; scope?: 'mine' | 'accessible'; include_children?: boolean },
 ): Promise<APIResponse<WorkflowState[]>> {
   const qs = params
     ? buildQueryString(params as Record<string, unknown>)

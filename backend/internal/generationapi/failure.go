@@ -2,6 +2,7 @@ package generationapi
 
 import (
 	"errors"
+	"regexp"
 	"strings"
 
 	"github.com/Gingoo-TvT/Qraft/backend/internal/domain"
@@ -17,19 +18,23 @@ func DescribeFailure(err error) *domain.GenerationFailure {
 		var failure domain.GenerationFailure
 		if application.Details(&failure) == nil && failure.Code != "" && failure.Message != "" {
 			failure.TechnicalDetails = boundedFailureText(failure.TechnicalDetails, 6000)
-			return &failure
+			return EnrichFailure(&failure)
 		}
 	}
 	failure := &domain.GenerationFailure{Code: "generation_failed", Message: "这道题未能完成生成", Suggestion: "查看生成任务了解失败阶段，修正需求或服务配置后重试。", TechnicalDetails: boundedFailureText(err.Error(), 6000)}
+	if formatted := modelOutputFailure(err.Error()); formatted != nil {
+		formatted.TechnicalDetails = failure.TechnicalDetails
+		return formatted
+	}
 	message := err.Error()
 	if application != nil {
 		message = application.Message()
 	}
 	text := strings.ToLower(message)
 	switch {
-	case strings.Contains(text, "401") || strings.Contains(text, "403") || strings.Contains(text, "unauthorized") || strings.Contains(text, "forbidden") || strings.Contains(text, "authentication") || strings.Contains(text, "api key") || strings.Contains(text, "invalid_api_key") || strings.Contains(text, "invalid token"):
+	case failureHTTPStatus(text, "401|403") || strings.Contains(text, "unauthorized") || strings.Contains(text, "forbidden") || strings.Contains(text, "authentication") || strings.Contains(text, "invalid_api_key") || strings.Contains(text, "invalid api key") || strings.Contains(text, "invalid token"):
 		failure.Code, failure.Message, failure.Suggestion = "model_authentication", "模型服务未通过身份验证", "检查模型配置中的 API 密钥、服务地址和模型访问权限。"
-	case strings.Contains(text, "429") || strings.Contains(text, "quota") || strings.Contains(text, "rate limit"):
+	case failureHTTPStatus(text, "429") || strings.Contains(text, "quota") || strings.Contains(text, "rate limit"):
 		failure.Code, failure.Message, failure.Suggestion = "model_rate_limit", "模型服务限流或额度不足", "检查模型额度，稍后重试；已完成题目会保留。"
 	case strings.Contains(text, "timeout") || strings.Contains(text, "deadline"):
 		failure.Code, failure.Message, failure.Suggestion = "service_timeout", "生成或验证服务响应超时", "检查服务连接后重试此题，必要时减少测试数据规模。"
@@ -49,6 +54,12 @@ func DescribeFailure(err error) *domain.GenerationFailure {
 		failure.Code, failure.Message, failure.Suggestion = "verification_failed", "参考解法或测试数据需要检查", "查看候选题的样例、参考程序和测试结果，修复后重新验证。"
 	}
 	return failure
+}
+
+// Array indices, ratings, and workflow IDs can contain HTTP-like digits.
+// Only an actual provider status context is evidence of an HTTP failure.
+func failureHTTPStatus(text, codes string) bool {
+	return regexp.MustCompile(`(?i)(http(?: status)?|status(?: code)?|response code)\s*[:=]?\s*(` + codes + `)\b`).MatchString(text)
 }
 
 func boundedFailureText(value string, limit int) string {

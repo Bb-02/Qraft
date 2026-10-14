@@ -49,6 +49,17 @@ func (a *WorkflowAccess) CanAccess(ctx context.Context, id string) (bool, error)
 	owner, err := a.owner(ctx, id, map[string]bool{})
 	return err == nil && owner != "" && owner == p.UserID, err
 }
+
+// IsOwnedByCurrentUser applies the task center's personal scope even for admins.
+// Permission to inspect a teammate's execution does not make it one's own task.
+func (a *WorkflowAccess) IsOwnedByCurrentUser(ctx context.Context, id string) (bool, error) {
+	p, ok := access.FromContext(ctx)
+	if !ok || a == nil || a.store == nil || id == "" {
+		return false, nil
+	}
+	owner, err := a.owner(ctx, id, map[string]bool{})
+	return err == nil && owner != "" && owner == p.UserID, err
+}
 func (a *WorkflowAccess) owner(ctx context.Context, id string, seen map[string]bool) (string, error) {
 	if id == "" || seen[id] || len(seen) >= 32 {
 		return "", nil

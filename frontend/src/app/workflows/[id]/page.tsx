@@ -21,6 +21,7 @@ import RefreshButton from '@/components/RefreshButton';
 import SimilarityPanel from '@/components/workflow/SimilarityPanel';
 import GenerationFailureNotice from '@/components/workflow/GenerationFailureNotice';
 import { generationStepLabel } from '@/lib/generation-failure';
+import { businessTaskKind, businessTaskStatus, businessTaskStatusLabel, businessTaskTitle, isProblemSetTask, problemSetRecoveryURL, safeBusinessTaskURL } from '@/lib/business-tasks';
 import {
   useWorkflow,
   useWorkflowActions,
@@ -29,7 +30,6 @@ import {
 import type { SimilarityResult, WorkflowEvent } from '@/lib/types';
 import type { WorkflowReviewReference } from '@/lib/types';
 import { cn, formatDate, formatRelativeTime, statusBadgeColor } from '@/lib/utils';
-import { STATUS_LABELS } from '@/lib/constants';
 import { isTerminal as statusIsTerminal, normalizeStatus } from '@/lib/status';
 
 // ---------------------------------------------------------------------------
@@ -251,7 +251,8 @@ export default function WorkflowDetailPage() {
       <div className="forge-page">
         <div className="flex flex-col items-center justify-center gap-4 py-20">
           <AlertCircle className="h-12 w-12 text-danger-400" />
-          <p className="text-danger-500">{error ?? '工作流未找到'}</p>
+          <p className="text-danger-500">{error ? '暂时无法读取任务，请检查服务连接后重新加载。' : '任务未找到。'}</p>
+          {error && <details className="max-w-xl text-sm"><summary>错误详情</summary><pre className="whitespace-pre-wrap break-words">{error}</pre></details>}
           <Link href="/workflows" className="forge-btn-secondary">
             <ArrowLeft className="h-4 w-4" />
             返回列表
@@ -262,6 +263,10 @@ export default function WorkflowDetailPage() {
   }
 
   const friendly = normalizeStatus(workflow.status);
+  const businessStatus = businessTaskStatus(workflow);
+  const recoveryURL = problemSetRecoveryURL(workflow);
+  const sourceURL = safeBusinessTaskURL(workflow.task?.source_url);
+  const resultURL = safeBusinessTaskURL(workflow.task?.result_url);
   const isTerminal = statusIsTerminal(friendly);
   const problemId = workflow.state?.problem_id;
   const currentReview = workflow.review_request;
@@ -279,9 +284,10 @@ export default function WorkflowDetailPage() {
   const stepLabels: Record<string, string> = { pending: '等待中', running: '进行中', completed: '已完成', failed: '失败', skipped: '已跳过' };
   return <div className="af-page af-task-detail">
     <Link href="/workflows" className="af-link"><ArrowLeft size={15} />返回任务中心</Link>
-    <PageHeader eyebrow="生成与验证" title="生成任务" description={workflow.start_time ? '开始于 ' + formatDate(workflow.start_time) : '查看当前进度与生成结果'}
+    <PageHeader eyebrow={workflow.task ? businessTaskKind(workflow) : '生成与验证'} title={workflow.task ? businessTaskTitle(workflow) : '生成任务'} description={workflow.start_time ? '提交于 ' + formatDate(workflow.start_time) : '查看当前进度与生成结果'}
       actions={<>
         <div className="flex items-center gap-2">
+          {recoveryURL && <Link href={recoveryURL} className="forge-btn-primary"><ExternalLink size={16} />处理未完成题目</Link>}
           {friendly === 'waiting_review' && reviewRequest && (
             <>
               <button
@@ -306,7 +312,7 @@ export default function WorkflowDetailPage() {
               </button>
             </>
           )}
-          {(friendly === 'failed') && (
+          {(friendly === 'failed') && !isProblemSetTask(workflow) && (
             <button
               className="forge-btn-secondary"
               onClick={handleRetry}
@@ -339,10 +345,12 @@ export default function WorkflowDetailPage() {
         </div>
 </>} />
     {importParentID && <Link href={"/problems/import?workflow=" + encodeURIComponent(importParentID)} className="forge-btn-secondary w-fit"><ExternalLink size={16} />查看整批导入结果</Link>}
+    {(sourceURL || resultURL) && <div className="flex flex-wrap gap-4 text-sm">{sourceURL && <Link className="af-link" href={sourceURL}>打开业务来源</Link>}{resultURL && resultURL !== sourceURL && <Link className="af-link" href={resultURL}>打开业务结果</Link>}</div>}
     <div className="af-task-state">
-      <span className={cn('forge-badge', statusBadgeColor(friendly))}>{importParentID && friendly === 'approved' ? '已完成' : STATUS_LABELS[friendly] ?? friendly}</span>
-      <div><strong>{(friendly === 'completed' || friendly === 'approved') ? '这次执行已完成' : friendly === 'failed' ? '任务需要处理' : friendly === 'waiting_review' ? '等待你的审核' : friendly === 'cancelled' ? '任务已停止' : '正在推进创作'}</strong>
-        <p>{problemId ? '生成结果已保存，可以打开题目继续查看与编辑。' : workflow.close_time ? '结束于 ' + formatRelativeTime(workflow.close_time) : '进度保存在服务端，可以稍后返回查看。'}</p></div>
+      <span className={cn('forge-badge', businessStatus === 'partial' ? 'bg-warning-100 text-warning-700' : statusBadgeColor(businessStatus))}>{businessTaskStatusLabel(workflow)}</span>
+      <div><strong>{businessStatus === 'partial' || businessStatus === 'failed' ? '任务需要处理' : ['waiting_review', 'awaiting_review', 'rejected_quarantined'].includes(businessStatus) ? '等待审核与处理' : ['completed', 'approved', 'succeeded'].includes(businessStatus) ? '这次执行已完成' : businessStatus === 'cancelled' ? '任务已停止' : businessTaskStatusLabel(workflow)}</strong>
+        <p>{workflow.task?.summary || (problemId ? '生成结果已保存，可以打开题目继续查看与编辑。' : workflow.close_time ? '结束于 ' + formatRelativeTime(workflow.close_time) : '进度保存在服务端，可以稍后返回查看。')}</p>
+        {workflow.task?.completed_count !== undefined && workflow.task.total_count !== undefined && <p>实际完成 {workflow.task.completed_count} / {workflow.task.total_count}</p>}</div>
       {problemId && <Link href={'/problems/' + problemId} className="forge-btn-primary"><ExternalLink size={16} />打开题目</Link>}
       {!isTerminal && <span className="af-task-connection">{connected ? <Wifi size={15} /> : <WifiOff size={15} />}{connected ? '实时更新' : '正在重连'}</span>}
     </div>
@@ -400,7 +408,7 @@ export default function WorkflowDetailPage() {
               <dt className="text-anvil-500 dark:text-anvil-400">状态</dt>
               <dd>
                 <span className={cn('forge-badge', statusBadgeColor(friendly))}>
-                  {importParentID && friendly === 'approved' ? '已完成' : STATUS_LABELS[friendly] ?? friendly}
+                  {businessTaskStatusLabel({ ...workflow, task: undefined })}
                 </span>
               </dd>
             </div>

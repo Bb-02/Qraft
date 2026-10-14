@@ -189,7 +189,12 @@ func (s *ProblemSetGenerationService) PrepareProblemSetBatchActivity(ctx context
 				}
 				prepared.Quiz = &activities.QuizGenerateInput{Subject: subject, Type: slot.Type, Difficulty: slot.QuizDifficulty, Count: 1, KnowledgePointNames: slot.Tags, Tags: slot.Tags, Visibility: domain.QuizVisibilityPrivate, CustomPrompt: brief, LLMRuntime: providers.Statement}
 			}
+			// The previous failure has already been included as feedback above.
+			// Do not show it as the current run's outcome while a fresh child runs.
+			slot.Error = ""
+			slot.Failure = nil
 		}
+		prepared.Slot = *slot
 		batch.Slots = append(batch.Slots, prepared)
 	}
 	if err = s.repo.ChangeGeneration(ctx, ref, func(current *domain.ProblemSetGenerationState) error {

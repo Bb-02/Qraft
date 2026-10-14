@@ -9,6 +9,10 @@ type GenerationFailure struct {
 	TechnicalDetails string   `json:"technical_details,omitempty"`
 	BlockedGate      string   `json:"blocked_gate,omitempty"`
 	BlockingIssues   []string `json:"blocking_issues,omitempty"`
+	Category         string   `json:"category,omitempty"`
+	Stage            string   `json:"stage,omitempty"`
+	Reason           string   `json:"reason,omitempty"`
+	Retryable        *bool    `json:"retryable,omitempty"`
 }
 
 type GenerationDifficultyAssessment struct {

@@ -17,7 +17,8 @@
     "test:imports": "node --test src/lib/problem-import*.test.cjs src/app/problems/import/*.test.cjs src/lib/problem-set-download.test.cjs",
     "test:exports": "node --test src/lib/problem-set-download.test.cjs",
     "test:issues": "node --test src/lib/issues-regression.test.cjs",
-    "test:generation": "node --test src/lib/generation-*.test.cjs"
+    "test:generation": "node --test src/lib/generation-*.test.cjs",
+    "test:tasks": "node --test src/lib/business-tasks.test.cjs"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.1.0",

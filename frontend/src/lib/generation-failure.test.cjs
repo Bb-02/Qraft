@@ -33,6 +33,7 @@ const Slot = load('../components/problem-sets/GenerationSlotCard.tsx', {
   '@/components/problem-sets/GenerationProgressNotice': { __esModule: true, default: ProgressNotice },
   '@/lib/problem-set-generation': generation,
   '@/lib/generation-progress': progress,
+  '@/lib/generation-failure': failures,
 }).default;
 
 test('legacy nested Temporal errors have a readable cause and keep their diagnostics', () => {
@@ -140,4 +141,70 @@ test('quality activity names are readable in older task event streams', () => {
   assert.equal(failures.generationStepLabel('StoreS3ReviewCandidateActivityV1'), '保存未完成候选题');
   assert.equal(failures.generationStepLabel('store_s_3_review_candidate_activity_v1'), '保存未完成候选题');
   assert.equal(failures.generationStepLabel('future_unknown_step'), 'future_unknown_step');
+});
+
+test('legacy authoring JSON errors identify format and stage before incidental rating or status numbers', () => {
+  const cases = [
+    ['json: cannot unmarshal number into Go struct field brief of type string; rating 401', /字段类型/],
+    ['json: unknown field "difficulty_401"', /不接受的字段/],
+    ['invalid character after object key', /不是合法的 JSON/],
+    ['unexpected end of JSON input', /输出前结束/],
+  ];
+  for (const [cause, reason] of cases) {
+    const technical = 'child workflow execution error: activity error: parsing authoring-plan response: ' + cause;
+    const summary = failures.generationFailureSummary('这道题未能完成生成', { code: 'generation_failed', message: '这道题未能完成生成', suggestion: '查看任务后重试', technical_details: technical }, 'set', 'none');
+    assert.equal(summary.category, '模型输出格式错误');
+    assert.equal(summary.stage, '设计题意与约束');
+    assert.match(summary.reason, reason);
+    assert.doesNotMatch(summary.message, /凭据|难度.*无法/);
+    assert.equal(summary.technicalDetails, technical);
+    assert.doesNotMatch(summary.suggestion, /人工审核|人工批准/);
+  }
+  for (const raw of ['workflow synthetic-401 failed', 'difficulty target 401 rejected', 'sample ID 429 was invalid']) {
+    assert.notEqual(failures.generationFailureSummary(raw).category, '模型访问配置问题');
+    assert.notEqual(failures.generationFailureSummary(raw).category, '模型额度或限流');
+  }
+});
+
+test('failure display has four plain-language fields, retry advice and accurate candidate facts', () => {
+  const failure = { code: 'internal_hidden_code', message: '作者回复无法读取', category: '模型输出格式错误', stage: '设计题意与约束', reason: '字段应为文本，实际返回数字。', suggestion: '修正输出格式后重试。', retryable: false, technical_details: 'synthetic raw diagnostic' };
+  const html = renderToStaticMarkup(React.createElement(Notice, { error: '', failure, candidate: 'none' }));
+  for (const label of ['失败类型', '发生阶段', '具体原因', '下一步']) assert.ok(html.includes(label));
+  assert.match(html, /直接重复重试通常无效/);
+  assert.match(html, /尚未保存可供审核的候选题/);
+  assert.doesNotMatch(html, /internal_hidden_code|管理员可以人工审核/);
+  assert.ok(html.indexOf('synthetic raw diagnostic') > html.indexOf('<details'));
+  const partial = renderToStaticMarkup(React.createElement(Notice, { error: 'QualityNotMet', candidate: 'incomplete' }));
+  assert.match(partial, /仅保存了未完成候选/);
+  assert.doesNotMatch(partial, /管理员可以人工审核/);
+});
+
+test('new author and reviewer format exceptions have readable stages and preserve original evidence', () => {
+  const cases = [
+    ['AuthoringPlanFormatError: unknown or non-canonical JSON key "extra_401"', '设计题意与约束', /不接受的字段名/],
+    ['AuthoringPlanFormatError: problem_definition: expected scalar, got object', '设计题意与约束', /字段类型/],
+    ['AuthoringPlanTruncatedError: stop_reason=length', '设计题意与约束', /输出前结束/],
+    ['ReviewerFormatError: expected scalar for assessment', '评审题目', /字段类型/],
+    ['ReviewerTruncatedError: max_tokens=401', '评审题目', /输出前结束/],
+  ];
+  for (const [cause, stage, reason] of cases) {
+    const raw = 'activity error: ' + cause;
+    const summary = failures.generationFailureSummary(raw);
+    assert.equal(summary.category, '模型输出格式错误');
+    assert.equal(summary.stage, stage);
+    assert.match(summary.reason, reason);
+    assert.equal(summary.retryable, false);
+    assert.equal(summary.technicalDetails, raw);
+    assert.doesNotMatch(summary.message, /凭据|难度不合法/);
+  }
+});
+
+test('twelve same authoring failures share a cause without merging unrelated or unknown failures', () => {
+  const repeated = Array.from({ length: 12 }, () => ({ status: 'failed', error: 'parsing authoring-plan response: json: cannot unmarshal number into field of type string' }));
+  const shared = failures.commonGenerationFailure(repeated);
+  assert.equal(shared.count, 12);
+  assert.equal(shared.total, 12);
+  assert.equal(shared.summary.category, '模型输出格式错误');
+  assert.equal(failures.commonGenerationFailure([{ status: 'failed', error: 'unknown a' }, { status: 'failed', error: 'unknown b' }]), undefined);
+  assert.equal(failures.commonGenerationFailure([{ status: 'failed', error: 'HTTP 401 unauthorized' }, { status: 'failed', error: 'parsing authoring-plan response: unknown field "extra"' }]), undefined);
 });

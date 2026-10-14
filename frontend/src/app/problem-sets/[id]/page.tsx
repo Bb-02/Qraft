@@ -8,6 +8,7 @@ import GenerationSlotCard from '@/components/problem-sets/GenerationSlotCard';
 import GenerationFailureNotice from '@/components/workflow/GenerationFailureNotice';
 import GenerationProgressNotice from '@/components/problem-sets/GenerationProgressNotice';
 import { consumeGenerationStartNotice, generationProgressTitle, generationStartNotice, type GenerationStartNotice } from '@/lib/generation-progress';
+import { commonGenerationFailure } from '@/lib/generation-failure';
 import { defaultSetGenerationConfig, generationConfigForSet, isSetGenerationActive, SET_QUESTION_TYPES, setGenerationStatusLabel, setGenerationTotal, validateSetGenerationConfig } from '@/lib/problem-set-generation';
 import { ViewTabs, ViewPanel } from '@/components/ui/ViewTabs';
 import { useParams } from 'next/navigation';
@@ -347,6 +348,7 @@ export default function ProblemSetDetailPage() {
   if (!set) return <div className="forge-page"><div className="rounded-lg bg-danger-50 p-4 text-danger-600">{error || '题集不存在'}</div></div>;
 
   const quality = set.quality;
+  const commonFailure = commonGenerationFailure(set.generation?.slots || []);
   const executionProgress = progressError
     ? { ...set.generation?.runtime, state: 'unknown' as const, message: progressError, elapsed_seconds: set.generation?.runtime?.elapsed_seconds ?? 0 }
     : set.generation?.runtime || (set.generation?.status === 'queued' ? { state: 'queued' as const, message: '生成任务已提交，等待执行服务开始。', elapsed_seconds: Math.max(0, Math.floor((Date.now() - Date.parse(set.generation.started_at)) / 1000)) } : undefined);
@@ -476,6 +478,11 @@ export default function ProblemSetDetailPage() {
         <p className="text-xs text-anvil-500">成功题目逐题保存。待审候选可先查看和修复；管理员人工审核后可恢复原题位。停止或失败后，重试只补齐未完成的题目。已有题目会计入题型配额，修改需求不会重写已入集的题目。</p>
         <GenerationProgressNotice progress={executionProgress} />
         {set.generation?.error && <div className="text-danger-600"><GenerationFailureNotice error={set.generation.error} /></div>}
+        {commonFailure && <section className="space-y-3 rounded-lg border border-warning-400/40 bg-warning-50 p-4 dark:bg-warning-500/10">
+          <h3 className="font-semibold">共同原因：{commonFailure.count} 道未完成题目在同一阶段遇到相同问题</h3>
+          <GenerationFailureNotice error="" summary={commonFailure.summary} />
+          <p className="text-xs text-anvil-500">先处理这个共同原因，再重试未完成题目；每道题的原始记录仍可在下方查看。</p>
+        </section>}
         {set.generation && <>
           <div className="flex items-center gap-3 text-sm">
             <progress className="h-2 flex-1 accent-forge-500" max={set.generation.slots.length || 1} value={set.generation.slots.filter((slot) => slot.status === 'succeeded').length} />

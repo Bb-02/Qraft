@@ -342,6 +342,9 @@ export interface WorkflowState {
   workflow_id: string;
   run_id: string;
   status: WorkflowStatus;
+  task?: WorkflowBusinessTask;
+  workflow_type?: string;
+  parent_workflow_id?: string;
   execution_status?: WorkflowStatus;
   review_request?: WorkflowReviewRequest;
   start_time?: string;
@@ -359,6 +362,20 @@ export interface WorkflowState {
   failure?: import('./generation-failure').GenerationFailure;
   // Used by workflow visualization components (WorkflowCanvas)
   steps?: WorkflowStep[];
+}
+
+export interface WorkflowBusinessTask {
+  kind: string;
+  title?: string;
+  source_url?: string;
+  result_url?: string;
+  parent_workflow_id?: string;
+  position?: number;
+  is_child?: boolean;
+  summary?: string;
+  status?: string;
+  completed_count?: number;
+  total_count?: number;
 }
 
 // ---------------------------------------------------------------------------

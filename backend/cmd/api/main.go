@@ -285,6 +285,7 @@ func main() {
 	problemHandler.SetQG15ExportEnabled(qg15ExportMode.HydroS3BindingEnabled)
 	workflowHandler := handler.NewWorkflowHandler(temporalClient, cfg.Temporal.Namespace)
 	workflowHandler.SetWorkflowAccess(workflowAccess)
+	workflowHandler.SetTaskResolver(service.NewWorkflowTaskResolver(problemSetRepo, problemRepo, repository.NewWorkflowOwnershipRepository(dbPool)))
 	ratingRepo := repository.NewRatingRepository(dbPool)
 	ratingRepo.SetArtifactReader(func(ctx context.Context, key string) ([]byte, error) {
 		return minioClient.DownloadFileLimited(ctx, key, 1<<20)

@@ -102,7 +102,7 @@ func (s *ProblemSetGenerationService) Status(ctx context.Context, id uuid.UUID) 
 	if err != nil {
 		return nil, err
 	}
-	state := set.Generation
+	state := explainSetGenerationFailures(set.Generation)
 	if !state.Active() {
 		return state, nil
 	}
@@ -145,7 +145,7 @@ func (s *ProblemSetGenerationService) Status(ctx context.Context, id uuid.UUID) 
 		if err != nil {
 			return nil, err
 		}
-		state = set.Generation
+		state = explainSetGenerationFailures(set.Generation)
 	}
 	if !state.Active() {
 		return state, nil

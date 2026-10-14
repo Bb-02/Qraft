@@ -37,6 +37,7 @@ type WorkflowHandler struct {
 	temporalClient client.Client
 	namespace      string
 	permissions    *service.WorkflowAccess
+	taskResolver   *service.WorkflowTaskResolver
 }
 
 const (
@@ -58,7 +59,8 @@ func NewWorkflowHandler(tc client.Client, namespace string) *WorkflowHandler {
 	return &WorkflowHandler{temporalClient: tc, namespace: namespace}
 }
 
-func (h *WorkflowHandler) SetWorkflowAccess(a *service.WorkflowAccess) { h.permissions = a }
+func (h *WorkflowHandler) SetWorkflowAccess(a *service.WorkflowAccess)     { h.permissions = a }
+func (h *WorkflowHandler) SetTaskResolver(r *service.WorkflowTaskResolver) { h.taskResolver = r }
 func (h *WorkflowHandler) authorize(c echo.Context, id string) error {
 	if h.permissions == nil {
 		return nil
@@ -80,11 +82,14 @@ func (h *WorkflowHandler) authorize(c echo.Context, id string) error {
 // workflowSummary is a lightweight representation of a workflow returned by
 // list and detail endpoints.
 type workflowSummary struct {
-	WorkflowID string `json:"workflow_id"`
-	RunID      string `json:"run_id"`
-	Status     string `json:"status"`
-	StartTime  string `json:"start_time,omitempty"`
-	CloseTime  string `json:"close_time,omitempty"`
+	WorkflowID       string                      `json:"workflow_id"`
+	RunID            string                      `json:"run_id"`
+	Status           string                      `json:"status"`
+	StartTime        string                      `json:"start_time,omitempty"`
+	CloseTime        string                      `json:"close_time,omitempty"`
+	WorkflowType     string                      `json:"workflow_type,omitempty"`
+	ParentWorkflowID string                      `json:"parent_workflow_id,omitempty"`
+	Task             *domain.WorkflowTaskSummary `json:"task,omitempty"`
 }
 
 // HandleList returns recent AlgoForge workflows. It supports an
@@ -94,9 +99,20 @@ func (h *WorkflowHandler) HandleList(c echo.Context) error {
 	ctx := c.Request().Context()
 
 	// Build a visibility query to find AlgoForge workflows.
-	query := `(WorkflowType = "ProblemGenerationWorkflow" OR WorkflowType = "ProblemValidationWorkflow" OR WorkflowType = "GPLTBatchGenerationWorkflow" OR WorkflowType = "QuizGenerationWorkflow" OR WorkflowType = "RatingWorkflow" OR WorkflowType = "ProblemSetGenerationWorkflow" OR WorkflowType = "S5MicroBatchWorkflowV1" OR WorkflowType = "ProblemImportWorkflow" OR WorkflowType = "ImportedProblemWorkflow")`
+	query := fmt.Sprintf(`(WorkflowType = "ProblemGenerationWorkflow" OR WorkflowType = "ProblemValidationWorkflow" OR WorkflowType = "GPLTBatchGenerationWorkflow" OR WorkflowType = "QuizGenerationWorkflow" OR WorkflowType = "ProblemSetQuizGenerationWorkflow" OR WorkflowType = "RatingWorkflow" OR WorkflowType = "ProblemSetGenerationWorkflow" OR WorkflowType = "S5MicroBatchWorkflowV1" OR WorkflowType = "ProblemImportWorkflow" OR WorkflowType = "ImportedProblemWorkflow" OR WorkflowType = "%s")`, generationapi.QualityWorkflowTypeV1)
+	includeChildren := c.QueryParam("include_children") == "true"
+	if !includeChildren {
+		query += ` AND ParentWorkflowId IS NULL`
+	}
+	mine := c.QueryParam("scope") == "mine"
 	if status := c.QueryParam("status"); status != "" {
-		query += fmt.Sprintf(` AND ExecutionStatus = "%s"`, mapStatusFilter(status))
+		mapped := mapStatusFilter(status)
+		switch mapped {
+		case "Running", "Completed", "Failed", "Canceled", "TimedOut", "Terminated":
+			query += fmt.Sprintf(` AND ExecutionStatus = "%s"`, mapped)
+		default:
+			return badRequest(c, "INVALID_STATUS", "任务状态筛选无效")
+		}
 	}
 
 	limit := intQueryParam(c, "size", 20)
@@ -135,8 +151,14 @@ func (h *WorkflowHandler) HandleList(c echo.Context) error {
 			if exec.GetExecution() == nil {
 				continue
 			}
+			if !includeChildren && exec.GetParentExecution().GetWorkflowId() != "" {
+				continue
+			}
 			if h.permissions != nil {
 				allowed, e := h.permissions.CanAccess(ctx, exec.GetExecution().GetWorkflowId())
+				if e == nil && allowed && mine {
+					allowed, e = h.permissions.IsOwnedByCurrentUser(ctx, exec.GetExecution().GetWorkflowId())
+				}
 				if e != nil {
 					return serviceUnavailable(c, "workflow access is unavailable")
 				}
@@ -144,7 +166,14 @@ func (h *WorkflowHandler) HandleList(c echo.Context) error {
 					continue
 				}
 			}
-			ws := workflowSummary{WorkflowID: exec.Execution.WorkflowId, RunID: exec.Execution.RunId, Status: exec.Status.String()}
+			ws := workflowSummary{WorkflowID: exec.Execution.WorkflowId, RunID: exec.Execution.RunId, Status: exec.Status.String(), WorkflowType: exec.GetType().GetName(), ParentWorkflowID: exec.GetParentExecution().GetWorkflowId()}
+			if h.taskResolver != nil {
+				ws.Task, err = h.taskResolver.Resolve(ctx, ws.WorkflowID, ws.WorkflowType, ws.ParentWorkflowID)
+				if err != nil {
+					log.Warn().Err(err).Str("workflow_id", ws.WorkflowID).Msg("task context unavailable")
+				}
+				reconcileTaskExecutionStatus(ws.Task, exec.Status)
+			}
 			if exec.StartTime != nil {
 				ws.StartTime = exec.StartTime.AsTime().Format(time.RFC3339)
 			}
@@ -190,9 +219,17 @@ func (h *WorkflowHandler) HandleGet(c echo.Context) error {
 
 	info := desc.WorkflowExecutionInfo
 	result := map[string]interface{}{
-		"workflow_id": info.Execution.WorkflowId,
-		"run_id":      info.Execution.RunId,
-		"status":      info.Status.String(),
+		"workflow_id":        info.Execution.WorkflowId,
+		"run_id":             info.Execution.RunId,
+		"status":             info.Status.String(),
+		"workflow_type":      info.GetType().GetName(),
+		"parent_workflow_id": info.GetParentExecution().GetWorkflowId(),
+	}
+	if h.taskResolver != nil {
+		if task, taskErr := h.taskResolver.Resolve(ctx, workflowID, info.GetType().GetName(), info.GetParentExecution().GetWorkflowId()); taskErr == nil {
+			reconcileTaskExecutionStatus(task, info.Status)
+			result["task"] = task
+		}
 	}
 
 	if info.StartTime != nil {
@@ -283,6 +320,28 @@ func (h *WorkflowHandler) HandleGet(c echo.Context) error {
 	}
 
 	return ok(c, result)
+}
+
+// A failed execution may not have managed to write its final business state.
+// Do not describe such an execution as still running. A completed execution
+// may intentionally have partial results or candidates awaiting human review.
+func reconcileTaskExecutionStatus(task *domain.WorkflowTaskSummary, status enums.WorkflowExecutionStatus) {
+	if task == nil {
+		return
+	}
+	switch task.Status {
+	case "queued", "pending", "ready", "running", "planning", "generating":
+	default:
+		return
+	}
+	switch status {
+	case enums.WORKFLOW_EXECUTION_STATUS_FAILED, enums.WORKFLOW_EXECUTION_STATUS_TIMED_OUT, enums.WORKFLOW_EXECUTION_STATUS_TERMINATED:
+		task.Status = "failed"
+		task.Summary = "本次执行已中断，已保存的结果会保留；请打开来源页面处理未完成内容。"
+	case enums.WORKFLOW_EXECUTION_STATUS_CANCELED:
+		task.Status = "cancelled"
+		task.Summary = "本次执行已停止，已保存的结果会保留。"
+	}
 }
 
 // ---------------------------------------------------------------------------

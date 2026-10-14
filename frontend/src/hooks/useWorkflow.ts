@@ -310,6 +310,8 @@ interface WorkflowListParams {
   page?: number;
   size?: number;
   status?: string;
+  scope?: 'mine' | 'accessible';
+  include_children?: boolean;
 }
 
 interface UseWorkflowListReturn {
