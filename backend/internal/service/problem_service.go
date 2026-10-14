@@ -431,6 +431,9 @@ func (s *ProblemService) DeleteProblem(ctx context.Context, id uuid.UUID) error 
 // given parameters. It returns the Temporal workflow run so callers can
 // track progress.
 func (s *ProblemService) TriggerGeneration(ctx context.Context, params domain.ProblemGenParams) (client.WorkflowRun, error) {
+	if params.IsProblemSetGeneration() {
+		return nil, fmt.Errorf("validation: 题集生成上下文只能由题集服务设置")
+	}
 	algoworkflow.StripProblemGenerationReviewRepairStateV1(&params)
 	if err := params.Validate(); err != nil {
 		return nil, fmt.Errorf("validation: %w", err)

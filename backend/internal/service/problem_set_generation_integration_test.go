@@ -23,6 +23,66 @@ type setPlanningLLMFixture struct {
 	t     *testing.T
 }
 
+type setIntroductoryPlanningFixture struct{ calls int }
+
+func (f *setIntroductoryPlanningFixture) CompleteWithRetry(_ context.Context, _ *llm.Request, _ int) (*llm.Response, error) {
+	f.calls++
+	text := "按要求生成基础模拟题，保持低难度；每道题分别检查，不阻止其他合格题位。"
+	if f.calls > 1 {
+		raw, _ := json.Marshal([]setPlanEntry{
+			{Position: 1, Type: domain.QuizTypeProgramming, Title: "无效合成目标", Brief: "这是一个完整的合成规划任务，故意填入不合法难度以检查其他题位仍可继续。", Tags: []string{"simulation"}, Level: domain.LevelAlgorithm, Difficulty: 0},
+			{Position: 2, Type: domain.QuizTypeProgramming, Title: "基础合成模拟", Brief: "给出完整的整数操作规则，通过直接模拟得到输出，保留用户要求的低难度目标。", Tags: []string{"simulation"}, Level: domain.LevelAlgorithm, Difficulty: 400},
+		})
+		text = string(raw)
+	}
+	return &llm.Response{Content: []llm.ContentBlock{{Type: "text", Text: text}}}, nil
+}
+
+func TestProblemSetPreparationIsolatesInvalidTargetsIntegration(t *testing.T) {
+	if os.Getenv("ALGOFORGE_INTEGRATION_DISPOSABLE_DB") != "true" {
+		t.Skip("requires a disposable migrated DATABASE_URL")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, os.Getenv("DATABASE_URL"))
+	require.NoError(t, err)
+	defer pool.Close()
+	repo := repository.NewProblemSetRepository(pool)
+	tags := repository.NewTagRepository(pool)
+	problems := NewProblemService(nil, nil, tags, nil, nil, "")
+	model := &setIntroductoryPlanningFixture{}
+	sets := NewProblemSetServiceWithDeps(repo, nil, nil, &HydroExportService{}, model)
+	config := &domain.ProblemSetGenerationConfig{Mode: "programming", Requirements: "CF 风格训练目标400，前段基础实现，不增加创新性门槛。", Distribution: []domain.ProblemSetTypeQuota{{Type: domain.QuizTypeProgramming, Count: 2, Score: 100}}}
+	set, err := sets.Create(ctx, ProblemSetCreateRequest{Title: "Synthetic introductory set", DesiredItemCount: 2, GenerationConfig: config})
+	require.NoError(t, err)
+	state, err := buildSetGenerationState(set)
+	require.NoError(t, err)
+	state, err = repo.ReserveGeneration(ctx, set.ID, set.UpdatedAt, state)
+	require.NoError(t, err)
+	runtime := &domain.LLMRuntimeConfig{Model: "fixture", APIKeyRef: "runtime:synthetic-set", BaseURL: "https://example.test", Provider: "fixture", Protocol: "openai-chat"}
+	svc := NewProblemSetGenerationService(sets, repo, problems, tags, nil, "", func(context.Context) (*domain.ProviderRuntimeConfig, error) {
+		return &domain.ProviderRuntimeConfig{Statement: runtime, Verification: runtime, Review: runtime}, nil
+	})
+	suite := &testsuite.WorkflowTestSuite{}
+	env := suite.NewTestActivityEnvironment()
+	env.RegisterActivity(svc.PrepareProblemSetBatchActivity)
+	result, err := env.ExecuteActivity(svc.PrepareProblemSetBatchActivity, domain.ProblemSetGenerationRef{SetID: set.ID, RunID: state.ID})
+	require.NoError(t, err)
+	var batch algoworkflow.ProblemSetBatch
+	require.NoError(t, result.Get(&batch))
+	require.Len(t, batch.Slots, 1, "invalid target must not discard the valid neighboring slot")
+	require.Equal(t, 2, batch.Slots[0].Slot.Position)
+	require.Equal(t, 400, batch.Slots[0].Programming.Params.Difficulty)
+	require.Equal(t, set.ID, batch.Slots[0].Programming.Params.ProblemSetContext.SetID)
+	require.NoError(t, batch.Slots[0].Programming.Params.Validate())
+	stored, err := sets.Get(ctx, set.ID)
+	require.NoError(t, err)
+	require.Equal(t, "failed", stored.Generation.Slots[0].Status)
+	require.Contains(t, stored.Generation.Slots[0].Error, "训练目标难度")
+	require.Empty(t, stored.Generation.Slots[0].Brief, "retry must replan invalid slot")
+	require.Equal(t, "ready", stored.Generation.Slots[1].Status)
+	require.Equal(t, 2, model.calls, "content failure must not regenerate the complete batch")
+}
+
 func (f *setPlanningLLMFixture) CompleteWithRetry(_ context.Context, r *llm.Request, _ int) (*llm.Response, error) {
 	f.calls++
 	require.Equal(f.t, "runtime:set-fixture", r.Runtime.APIKeyRef)

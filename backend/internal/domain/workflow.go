@@ -466,6 +466,10 @@ type ProblemGenParams struct {
 	// Target difficulty rating (800-3500, step 100).
 	Difficulty int `json:"difficulty"`
 
+	// Server-owned context for set generation. Single-problem entry points
+	// reject this field; sets may use any bounded integer training target.
+	ProblemSetContext *ProblemSetGenerationContext `json:"problem_set_context,omitempty"`
+
 	// Desired tags (must be valid for Level).
 	Tags []string `json:"tags"`
 
@@ -530,13 +534,22 @@ func (p *ProblemGenParams) Validate() error {
 		return fmt.Errorf("invalid level: %q", p.Level)
 	}
 
-	minD, maxD := DifficultyRange(p.Level)
-	if p.Difficulty < minD || p.Difficulty > maxD {
-		return fmt.Errorf("difficulty %d out of range [%d, %d] for level %q",
-			p.Difficulty, minD, maxD, p.Level)
+	if err := p.ProblemSetContext.Validate(); err != nil {
+		return err
 	}
-	if p.Difficulty%100 != 0 {
-		return fmt.Errorf("difficulty %d must be a multiple of 100", p.Difficulty)
+	if p.IsProblemSetGeneration() {
+		if err := ValidateTrainingDifficulty(p.Difficulty); err != nil {
+			return err
+		}
+	} else {
+		minD, maxD := DifficultyRange(p.Level)
+		if p.Difficulty < minD || p.Difficulty > maxD {
+			return fmt.Errorf("difficulty %d out of range [%d, %d] for level %q",
+				p.Difficulty, minD, maxD, p.Level)
+		}
+		if p.Difficulty%100 != 0 {
+			return fmt.Errorf("difficulty %d must be a multiple of 100", p.Difficulty)
+		}
 	}
 	if err := p.KnowledgePointCombination.Validate(p.Tags); err != nil {
 		return fmt.Errorf("knowledge_point_combination: %w", err)

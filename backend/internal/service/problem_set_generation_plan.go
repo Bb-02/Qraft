@@ -115,7 +115,7 @@ func (s *ProblemSetGenerationService) PrepareProblemSetBatchActivity(ctx context
 			text = strings.TrimSuffix(strings.TrimSpace(text), "\x60\x60\x60")
 			err = json.Unmarshal([]byte(text), &planned)
 			if err == nil {
-				err = validateSetBatchPlan(planned, missing, state.Slots, catalog)
+				err = validateSetBatchPlanStructure(planned, missing)
 			}
 			if err == nil {
 				break
@@ -126,6 +126,7 @@ func (s *ProblemSetGenerationService) PrepareProblemSetBatchActivity(ctx context
 			return nil, temporal.NewNonRetryableApplicationError("题集规划未通过校验："+err.Error(), "InvalidSetPlan", err)
 		}
 		byPosition := map[int]setPlanEntry{}
+		planErrors := setBatchPlanEntryErrors(planned, state.Slots, catalog)
 		for _, plan := range planned {
 			byPosition[plan.Position] = plan
 		}
@@ -137,12 +138,18 @@ func (s *ProblemSetGenerationService) PrepareProblemSetBatchActivity(ctx context
 				slots[i].Level = plan.Level
 				slots[i].Difficulty = plan.Difficulty
 				slots[i].QuizDifficulty = plan.QuizDifficulty
+				if planErr := planErrors[plan.Position]; planErr != nil {
+					failSetPlanningSlot(&slots[i], "题目规划需要修正："+planErr.Error())
+				}
 			}
 		}
 	}
 	batch := &algoworkflow.ProblemSetBatch{Slots: make([]algoworkflow.ProblemSetPreparedSlot, 0, len(slots))}
 	for i := range slots {
 		slot := &slots[i]
+		if slot.Status == "failed" {
+			continue
+		}
 		if slot.ChildID != "" && slot.ProblemID == nil && slot.QuizID == nil {
 			if err = s.recoverSetSlot(ctx, slot); err != nil {
 				return nil, err
@@ -161,20 +168,15 @@ func (s *ProblemSetGenerationService) PrepareProblemSetBatchActivity(ctx context
 		}
 		if slot.ProblemID == nil && slot.QuizID == nil {
 			if slot.Type == domain.QuizTypeProgramming {
-				params := domain.DefaultProblemGenParams()
-				params.Level = slot.Level
-				params.Tags = append([]string(nil), slot.Tags...)
-				params.Difficulty = slot.Difficulty
-				params.Locale = "zh"
-				params.CustomPrompt = brief
-				params.ProviderConfig = providers
-				params.MetadataExtras = map[string]interface{}{"problem_set_id": ref.SetID.String(), "problem_set_position": slot.Position}
+				params := setProblemGenParams(ref, *slot, providers, brief)
 				if err = s.problems.prepareGenerationJobParams(ctx, &params); err != nil {
-					return nil, err
+					failSetPlanningSlot(slot, "编程题生成参数需要修正："+strings.TrimPrefix(err.Error(), "validation: "))
+					continue
 				}
 				quality, err := generationJobQualityInput(slot.ChildID, params)
 				if err != nil {
-					return nil, err
+					failSetPlanningSlot(slot, "编程题生成参数需要修正："+strings.TrimPrefix(err.Error(), "validation: "))
+					continue
 				}
 				prepared.Programming = &quality
 			} else {
@@ -245,9 +247,24 @@ func setBatchPlanPrompt(set *domain.ProblemSet, state *domain.ProblemSetGenerati
 
 const setBatchPlanSystem = `你是整套试题的统筹命题人。将整套需求分解为指定 targets 的分题任务，只规划这些位置，不增删位置，不修改题型。输出 JSON 数组，每项字段：
 {"position":1,"type":"programming|choice|fill_blank|judge","title":"简洁工作标题","brief":"明确的独立命题任务","tags":["知识点"],"level":"algorithm","difficulty":1500,"quiz_difficulty":"medium"}
-编程题：level 与 tags 必须精确取自给定目录且属于同一 level，难度必须为 100 的倍数并在所有所选标签范围内；选择 1-3 个真实需要的知识点，任务写明核心思维、可行解法思路、预期复杂度和边界挑战，避免换皮模板。客观题：不用 level/difficulty，quiz_difficulty 为 easy/medium/hard；任务写清考查目标、迷惑选项依据或填空/判断的唯一性条件，不要求标准输入输出或测试点。每题应有独立价值，不互相泄露答案；对照已经规划的题位避免同构重复，按整套自然语言难度组织合理梯度。标题不超过 80 字，brief 为 100-600 字，不输出题目成品。仅输出数组。`
+编程题：以用户的整套需求和难度描述为准，可以从语法、基础实现逐步过渡到算法和思维题。level 与 tags 必须精确取自给定目录且属于同一 level；level 只是内容分类，目录中的 min/max 只是建议，不是难度门槛，不得为了分类或标签提高用户要求的难度。difficulty 是 1-10000 内的整数训练目标，不必为 100 的倍数；400 或更低的基础题同样有效。选择 1-3 个实际考查的知识点，任务写明学习目标、可行解法思路、合理复杂度和适用边界；基础语法、直接计算、模拟、枚举和标准算法练习都可以有教学价值，不要求额外技巧、创新性或更复杂的算法。客观题：不用 level/difficulty，quiz_difficulty 为 easy/medium/hard；任务写清考查目标、迷惑选项依据或填空/判断的唯一性条件，不要求标准输入输出或测试点。每题应有独立价值，不互相泄露答案；对照已经规划的题位避免同构重复，按用户要求组织合理梯度。标题不超过 80 字，brief 为 100-600 字，不输出题目成品。仅输出数组。`
 
 func validateSetBatchPlan(plans []setPlanEntry, targets, previous []domain.ProblemSetGenerationSlot, catalog []domain.TagCategory) error {
+	if err := validateSetBatchPlanStructure(plans, targets); err != nil {
+		return err
+	}
+	errorsByPosition := setBatchPlanEntryErrors(plans, previous, catalog)
+	for _, plan := range plans {
+		if err := errorsByPosition[plan.Position]; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// A malformed quota/position response must be regenerated as a batch. Content
+// defects belong to individual slots and must not discard valid neighbors.
+func validateSetBatchPlanStructure(plans []setPlanEntry, targets []domain.ProblemSetGenerationSlot) error {
 	if len(plans) != len(targets) {
 		return fmt.Errorf("本批必须恰好 %d 题", len(targets))
 	}
@@ -255,10 +272,18 @@ func validateSetBatchPlan(plans []setPlanEntry, targets, previous []domain.Probl
 	for _, target := range targets {
 		wanted[target.Position] = target.Type
 	}
-	tagMap := map[string]domain.TagCategory{}
-	for _, tag := range catalog {
-		tagMap[tag.TagName] = tag
+	for _, plan := range plans {
+		typ, ok := wanted[plan.Position]
+		if !ok || typ != plan.Type {
+			return fmt.Errorf("题位或题型不匹配: %d", plan.Position)
+		}
+		delete(wanted, plan.Position)
 	}
+	return nil
+}
+
+func setBatchPlanEntryErrors(plans []setPlanEntry, previous []domain.ProblemSetGenerationSlot, catalog []domain.TagCategory) map[int]error {
+	errorsByPosition := map[int]error{}
 	titles := map[string]bool{}
 	briefs := map[string]bool{}
 	for _, slot := range previous {
@@ -268,38 +293,72 @@ func validateSetBatchPlan(plans []setPlanEntry, targets, previous []domain.Probl
 		}
 	}
 	for _, plan := range plans {
-		typ, ok := wanted[plan.Position]
-		if !ok || typ != plan.Type {
-			return fmt.Errorf("题位或题型不匹配: %d", plan.Position)
+		if err := validateSetPlanEntry(plan, catalog); err != nil {
+			errorsByPosition[plan.Position] = err
+			continue
 		}
-		delete(wanted, plan.Position)
 		title, brief := strings.TrimSpace(plan.Title), strings.TrimSpace(plan.Brief)
-		if title == "" || len([]rune(title)) > 80 || len([]rune(brief)) < 20 || len([]rune(brief)) > 2000 {
-			return fmt.Errorf("第 %d 题任务不完整或过长", plan.Position)
-		}
 		if titles[title] || briefs[brief] {
-			return fmt.Errorf("第 %d 题与其他题位重复", plan.Position)
+			errorsByPosition[plan.Position] = fmt.Errorf("第 %d 题与其他题位重复", plan.Position)
+			continue
 		}
 		titles[title] = true
 		briefs[brief] = true
-		if len(plan.Tags) < 1 || len(plan.Tags) > 4 {
-			return fmt.Errorf("第 %d 题缺少明确知识点", plan.Position)
+	}
+	return errorsByPosition
+}
+
+func validateSetPlanEntry(plan setPlanEntry, catalog []domain.TagCategory) error {
+	title, brief := strings.TrimSpace(plan.Title), strings.TrimSpace(plan.Brief)
+	if title == "" || len([]rune(title)) > 80 || len([]rune(brief)) < 20 || len([]rune(brief)) > 2000 {
+		return fmt.Errorf("第 %d 题任务不完整或过长", plan.Position)
+	}
+	if len(plan.Tags) < 1 || len(plan.Tags) > 4 {
+		return fmt.Errorf("第 %d 题缺少明确知识点", plan.Position)
+	}
+	if plan.Type == domain.QuizTypeProgramming {
+		if !plan.Level.IsValid() {
+			return fmt.Errorf("第 %d 题内容分类无效，请选择目录中的分类", plan.Position)
 		}
-		if plan.Type == domain.QuizTypeProgramming {
-			if !plan.Level.IsValid() || plan.Difficulty%100 != 0 {
-				return fmt.Errorf("第 %d 题等级或难度无效", plan.Position)
-			}
-			for _, tag := range plan.Tags {
-				entry, ok := tagMap[tag]
-				if !ok || entry.Level != plan.Level || plan.Difficulty < entry.MinDifficulty || plan.Difficulty > entry.MaxDifficulty {
-					return fmt.Errorf("第 %d 题标签 %s 与等级/难度不兼容", plan.Position, tag)
-				}
-			}
-		} else if !plan.QuizDifficulty.IsValid() {
-			return fmt.Errorf("第 %d 题客观题难度无效", plan.Position)
+		if err := domain.ValidateTrainingDifficulty(plan.Difficulty); err != nil {
+			return fmt.Errorf("第 %d 题：%w", plan.Position, err)
 		}
+		tagMap := map[string]domain.TagCategory{}
+		for _, tag := range catalog {
+			tagMap[tag.TagName] = tag
+		}
+		for _, tag := range plan.Tags {
+			entry, ok := tagMap[tag]
+			if !ok || entry.Level != plan.Level {
+				return fmt.Errorf("第 %d 题知识点 %s 不属于所选分类，请按目录修正", plan.Position, tag)
+			}
+		}
+	} else if !plan.QuizDifficulty.IsValid() {
+		return fmt.Errorf("第 %d 题客观题难度无效", plan.Position)
 	}
 	return nil
+}
+
+func failSetPlanningSlot(slot *domain.ProblemSetGenerationSlot, reason string) {
+	slot.Status = "failed"
+	slot.Error = boundedSetError(reason)
+	slot.Regenerate = true
+	slot.ChildID = ""
+	// A retry must replan this slot instead of repeating an invalid brief.
+	slot.Brief = ""
+}
+
+func setProblemGenParams(ref domain.ProblemSetGenerationRef, slot domain.ProblemSetGenerationSlot, providers *domain.ProviderRuntimeConfig, brief string) domain.ProblemGenParams {
+	params := domain.DefaultProblemGenParams()
+	params.Level = slot.Level
+	params.Tags = append([]string(nil), slot.Tags...)
+	params.Difficulty = slot.Difficulty
+	params.ProblemSetContext = &domain.ProblemSetGenerationContext{SetID: ref.SetID, Position: slot.Position}
+	params.Locale = "zh"
+	params.CustomPrompt = brief
+	params.ProviderConfig = providers
+	params.MetadataExtras = map[string]interface{}{"problem_set_id": ref.SetID.String(), "problem_set_position": slot.Position}
+	return params
 }
 func setGenerationHeartbeat(ctx context.Context) func() {
 	done := make(chan struct{})

@@ -1,14 +1,29 @@
 package service
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Gingoo-TvT/Qraft/backend/internal/domain"
 	"github.com/Gingoo-TvT/Qraft/backend/internal/generationapi"
+	"github.com/google/uuid"
 	enumspb "go.temporal.io/api/enums/v1"
 )
+
+func TestPublicSingleProblemEntrypointsRejectSetGenerationContext(t *testing.T) {
+	params := domain.DefaultProblemGenParams()
+	params.Difficulty = 400
+	params.ProblemSetContext = &domain.ProblemSetGenerationContext{SetID: uuid.New(), Position: 1}
+	svc := &ProblemService{}
+	if _, err := svc.TriggerGeneration(context.Background(), params); err == nil || !strings.Contains(err.Error(), "只能由题集服务设置") {
+		t.Fatalf("legacy public entrypoint accepted server context: %v", err)
+	}
+	if _, err := svc.TriggerGenerationJob(context.Background(), generationapi.JobIDPrefix+strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64), time.Minute, params); err == nil || !strings.Contains(err.Error(), "只能由题集服务设置") {
+		t.Fatalf("job public entrypoint accepted server context: %v", err)
+	}
+}
 
 func TestGenerationJobStartOptionsBindOnlyStableHashes(t *testing.T) {
 	jobID := generationapi.JobIDPrefix + strings.Repeat("a", 64)

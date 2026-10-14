@@ -3,9 +3,11 @@ package service
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/Gingoo-TvT/Qraft/backend/internal/domain"
+	"github.com/Gingoo-TvT/Qraft/backend/internal/generationapi"
 	algoworkflow "github.com/Gingoo-TvT/Qraft/backend/internal/workflow"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -129,7 +131,7 @@ func TestSetBatchPlannerRejectsModelTypeAndCoverageDrift(t *testing.T) {
 		{"duplicate position", func(p []setPlanEntry) { p[1].Position = 1 }},
 		{"duplicate task", func(p []setPlanEntry) { p[1].Brief = p[0].Brief }},
 		{"invented tag", func(p []setPlanEntry) { p[0].Tags = []string{"invented"} }},
-		{"out of range", func(p []setPlanEntry) { p[0].Difficulty = 3000 }},
+		{"invalid training target", func(p []setPlanEntry) { p[0].Difficulty = 0 }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			plans := append([]setPlanEntry(nil), valid...)
@@ -138,6 +140,54 @@ func TestSetBatchPlannerRejectsModelTypeAndCoverageDrift(t *testing.T) {
 		})
 	}
 	require.Error(t, validateSetBatchPlan(valid[:1], targets, nil, catalog))
+}
+
+func TestSetBatchPlansAllowIntroductoryAndIntermediateTargets(t *testing.T) {
+	catalog := []domain.TagCategory{
+		{TagName: "grammar", Level: domain.LevelSyntax, MinDifficulty: 800, MaxDifficulty: 1200},
+		{TagName: "simulation", Level: domain.LevelAlgorithm, MinDifficulty: 800, MaxDifficulty: 1400},
+	}
+	targets := []domain.ProblemSetGenerationSlot{{Position: 1, Type: domain.QuizTypeProgramming}, {Position: 2, Type: domain.QuizTypeProgramming}}
+	plans := []setPlanEntry{
+		{Position: 1, Type: domain.QuizTypeProgramming, Title: "基础计算", Brief: "按输入直接计算一个整数结果，学习读取变量和准确输出，不需要额外算法技巧。", Tags: []string{"grammar"}, Level: domain.LevelSyntax, Difficulty: 125},
+		{Position: 2, Type: domain.QuizTypeProgramming, Title: "思维观察", Brief: "根据完整规则找出一个简短的不变量，直接模拟即可，不为了分类而提高难度。", Tags: []string{"simulation"}, Level: domain.LevelAlgorithm, Difficulty: 400},
+	}
+	require.NoError(t, validateSetBatchPlan(plans, targets, nil, catalog))
+	// A tag's suggested upper range does not cap the user's training target.
+	plans[1].Difficulty = 1601
+	require.NoError(t, validateSetBatchPlan(plans, targets, nil, catalog))
+	params := setProblemGenParams(domain.ProblemSetGenerationRef{SetID: uuid.New()}, domain.ProblemSetGenerationSlot{Position: 1, Level: domain.LevelAlgorithm, Difficulty: 125, Tags: []string{"simulation"}}, nil, "独立基础任务")
+	require.NoError(t, params.Validate())
+	quality, err := generationJobQualityInput(generationapi.JobIDPrefix+strings.Repeat("a", 64), params)
+	require.NoError(t, err)
+	require.Equal(t, 125, quality.Params.Difficulty)
+	require.Equal(t, params.ProblemSetContext, quality.Params.ProblemSetContext)
+}
+
+func TestSetPlanningFailuresLeaveValidNeighborsAndRetryReplansOnlyFailures(t *testing.T) {
+	catalog := []domain.TagCategory{{TagName: "simulation", Level: domain.LevelAlgorithm, MinDifficulty: 800, MaxDifficulty: 1400}}
+	plans := []setPlanEntry{
+		{Position: 1, Type: domain.QuizTypeProgramming, Title: "坏目标", Brief: "这是完整的合成题目任务，用于检查一个不合法难度不会阻断其他题位。", Tags: []string{"simulation"}, Level: domain.LevelAlgorithm, Difficulty: 0},
+		{Position: 2, Type: domain.QuizTypeProgramming, Title: "有效题位", Brief: "这是另一个完整的合成题目任务，保持基础模拟并设置有效的低难度目标。", Tags: []string{"simulation"}, Level: domain.LevelAlgorithm, Difficulty: 400},
+	}
+	targets := []domain.ProblemSetGenerationSlot{{Position: 1, Type: domain.QuizTypeProgramming}, {Position: 2, Type: domain.QuizTypeProgramming}}
+	require.NoError(t, validateSetBatchPlanStructure(plans, targets))
+	errorsByPosition := setBatchPlanEntryErrors(plans, nil, catalog)
+	require.Len(t, errorsByPosition, 1)
+	require.Contains(t, errorsByPosition[1].Error(), "训练目标难度")
+	require.Nil(t, errorsByPosition[2])
+	slot := domain.ProblemSetGenerationSlot{Position: 1, Type: domain.QuizTypeProgramming, Brief: plans[0].Brief}
+	failSetPlanningSlot(&slot, errorsByPosition[1].Error())
+	require.Equal(t, "failed", slot.Status)
+	require.Empty(t, slot.Brief, "a retry must not reuse the invalid task")
+	require.True(t, slot.Regenerate)
+	set := &domain.ProblemSet{ID: uuid.New(), Title: "合成题集", DesiredItemCount: 2, GenerationConfig: &domain.ProblemSetGenerationConfig{Mode: "programming", Distribution: []domain.ProblemSetTypeQuota{{Type: domain.QuizTypeProgramming, Count: 2, Score: 100}}}}
+	set.Generation = &domain.ProblemSetGenerationState{ConfigFingerprint: setConfigFingerprint(set), Slots: []domain.ProblemSetGenerationSlot{slot, {Position: 2, Type: domain.QuizTypeProgramming, Status: "failed", Brief: plans[1].Brief}}}
+	state, err := buildSetGenerationState(set)
+	require.NoError(t, err)
+	require.Equal(t, "pending", state.Slots[0].Status)
+	require.Empty(t, state.Slots[0].Brief)
+	require.Equal(t, plans[1].Brief, state.Slots[1].Brief)
 }
 
 type setStateOnlyStore struct {

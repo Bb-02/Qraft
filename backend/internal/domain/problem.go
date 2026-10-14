@@ -64,7 +64,8 @@ type Problem struct {
 	// Two-tier classification: syntax or algorithm.
 	Level ProblemLevel `json:"level" db:"level"`
 
-	// Difficulty rating in the range [800, 3500], step 100.
+	// Author-requested training difficulty in the range [1, 10000]. It is
+	// independent of formal rating assessments and authoring categories.
 	Difficulty int `json:"difficulty" db:"difficulty"`
 
 	// Classification tags (e.g. ["dp", "greedy"]).
@@ -129,13 +130,8 @@ func (p *Problem) Validate() error {
 	// Stored and imported ratings are independent of the authoring category.
 	// DifficultyRange is a generation target, not a restriction on editing
 	// existing problems (an algorithm problem can legitimately be rated 1000).
-	const minD, maxD = 800, 3500
-	if p.Difficulty < minD || p.Difficulty > maxD {
-		return fmt.Errorf("difficulty %d out of range [%d, %d] for level %q",
-			p.Difficulty, minD, maxD, p.Level)
-	}
-	if p.Difficulty%100 != 0 {
-		return fmt.Errorf("difficulty %d must be a multiple of 100", p.Difficulty)
+	if err := ValidateTrainingDifficulty(p.Difficulty); err != nil {
+		return err
 	}
 
 	// Limits sanity check.

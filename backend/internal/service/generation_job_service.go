@@ -31,6 +31,9 @@ func (s *ProblemService) TriggerGenerationJob(
 	runTimeout time.Duration,
 	params domain.ProblemGenParams,
 ) (client.WorkflowRun, error) {
+	if params.IsProblemSetGeneration() {
+		return nil, fmt.Errorf("validation: 题集生成上下文只能由题集服务设置")
+	}
 	if !generationapi.IsJobID(workflowID) {
 		return nil, fmt.Errorf("validation: invalid generation job id")
 	}
@@ -94,7 +97,7 @@ func (s *ProblemService) prepareGenerationJobParams(
 		if err != nil {
 			return fmt.Errorf("loading generation job tag %q: %w", tagName, err)
 		}
-		if params.Difficulty < category.MinDifficulty || params.Difficulty > category.MaxDifficulty {
+		if !params.IsProblemSetGeneration() && (params.Difficulty < category.MinDifficulty || params.Difficulty > category.MaxDifficulty) {
 			return fmt.Errorf(
 				"validation: difficulty %d is outside tag %s range [%d,%d]",
 				params.Difficulty,

@@ -293,8 +293,8 @@ func validateStatementRendererInputV1(in RenderStatementFromAuthoringBundleInput
 	if in.PresentationLocale != "en" && in.PresentationLocale != "zh" {
 		return nil, fmt.Errorf("statement renderer locale must be en or zh")
 	}
-	if in.ExpectedDifficulty <= 0 || in.ExpectedDifficulty%100 != 0 {
-		return nil, fmt.Errorf("expected difficulty must be a positive multiple of 100")
+	if err := domain.ValidateTrainingDifficulty(in.ExpectedDifficulty); err != nil {
+		return nil, err
 	}
 	if len(in.RequiredKnowledgePoints) > 64 {
 		return nil, fmt.Errorf("required knowledge-point list is too large")
