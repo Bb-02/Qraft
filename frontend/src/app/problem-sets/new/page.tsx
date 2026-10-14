@@ -7,6 +7,9 @@ import { useRouter } from 'next/navigation';
 
 import { FormSection, PageHeader } from '@/components/ui/Workspace';
 import GenerationConfigFields from '@/components/problem-sets/GenerationConfigFields';
+import GenerationReadinessNotice from '@/components/problem-sets/GenerationReadinessNotice';
+import { useAuth } from '@/components/auth/AuthProvider';
+import { useGenerationReadiness } from '@/lib/use-generation-readiness';
 import GenerationFailureNotice from '@/components/workflow/GenerationFailureNotice';
 import { defaultSetGenerationConfig, SET_QUESTION_TYPES, setGenerationTotal, validateSetGenerationConfig } from '@/lib/problem-set-generation';
 import { createProblemSet } from '@/lib/api';
@@ -18,6 +21,7 @@ const DEFAULT_DIFFICULTY = '按整套需求和适用选手水平安排难度与�
 
 export default function NewProblemSetPage() {
   const router = useRouter();
+  const { session } = useAuth();
   const [title, setTitle] = useState('');
   const [code, setCode] = useState('');
   const [kind, setKind] = useState<ProblemSetKind>('contest');
@@ -30,6 +34,7 @@ export default function NewProblemSetPage() {
   const [autoGenerate, setAutoGenerate] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const readiness = useGenerationReadiness(generationConfig, autoGenerate && Boolean(session));
 
   useEffect(() => {
     const query = new URLSearchParams(window.location.search);
@@ -78,6 +83,13 @@ export default function NewProblemSetPage() {
       generate_prompt: false,
     };
     try {
+      if (autoGenerate) {
+        const checked = await readiness.refresh();
+        if (!checked?.ready) {
+          setError(checked?.blockers.map((issue) => issue.message).join('；') || '生成前检查未通过，请查看下方提示或重新检查。');
+          return;
+        }
+      }
       const response = await createProblemSet(payload);
       if (!response.data) throw new Error('服务没有返回新题集。');
       if (response.data.generation_error) {
@@ -133,7 +145,8 @@ export default function NewProblemSetPage() {
             <div className="grid grid-cols-2 gap-4 border-y border-[var(--dl)] py-5"><div><strong className="text-3xl font-semibold tabular-nums">{setGenerationTotal(generationConfig)}</strong><p className="af-hint mt-1">题目总数</p></div><div><strong className="text-3xl font-semibold tabular-nums">{totalScore}</strong><p className="af-hint mt-1">预期总分</p></div></div>
             <dl className="space-y-3 text-sm"><div className="af-summary-row"><dt>编排模式</dt><dd>{generationConfig.mode === 'mixed' ? '混合题型' : '纯编程比赛'}</dd></div>{generationConfig.distribution.filter((quota) => quota.count > 0).map((quota) => <div key={quota.type} className="af-summary-row"><dt>{SET_QUESTION_TYPES.find((type) => type.type === quota.type)?.label}</dt><dd>{quota.count} 题 × {quota.score} 分</dd></div>)}</dl>
             <label className="flex items-start gap-2 text-sm"><input className="mt-1" type="checkbox" checked={autoGenerate} onChange={(event) => setAutoGenerate(event.target.checked)} /><span>保存后自动生成整套题目<span className="af-hint mt-1 block">关闭后仅保存需求，可稍后开始。</span></span></label>
-            <div className="af-sticky-actions"><button className="forge-btn-primary w-full" type="submit" disabled={saving}>{saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}{saving ? '保存中…' : autoGenerate ? '创建并开始生成' : '保存题集'}</button><Link href="/problem-sets" className="forge-btn-secondary w-full">取消</Link></div>
+            {autoGenerate && <GenerationReadinessNotice {...readiness} onRefresh={() => void readiness.refresh()} />}
+            <div className="af-sticky-actions"><button className="forge-btn-primary w-full" type="submit" disabled={saving || (autoGenerate && !readiness.canStart)}>{saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}{saving ? '保存中…' : autoGenerate ? '创建并开始生成' : '保存题集'}</button><Link href="/problem-sets" className="forge-btn-secondary w-full">取消</Link></div>
             <p className="af-hint">使用已保存的模型配置。开始后可离开页面，规划与生成进度会持续保存。</p>
             <Link href="/settings" className="af-link text-sm">查看模型配置</Link>
           </div>

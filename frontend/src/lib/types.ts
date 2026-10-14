@@ -1113,6 +1113,21 @@ export interface ProblemSetGenerationState {
   updated_at: string;
 }
 
+export interface ProblemSetGenerationReadinessIssue {
+  code: string;
+  message: string;
+  settings_url?: string;
+}
+
+export interface ProblemSetGenerationReadiness {
+  ready: boolean;
+  scope: 'configured_routes';
+  blockers: ProblemSetGenerationReadinessIssue[];
+  warnings: ProblemSetGenerationReadinessIssue[];
+  checks: Array<{ code: string; status: 'ready' | 'blocked' | 'warning'; message: string }>;
+  effective_roles: Array<{ role: 'generation' | 'verification' | 'review'; label: string; model: string; configured: boolean }>;
+}
+
 export interface ProblemSetQuality {
   valid: boolean;
   ready_for_export: boolean;

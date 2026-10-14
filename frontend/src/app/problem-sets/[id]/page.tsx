@@ -4,6 +4,8 @@ import { downloadProblemSetTesting, parseExportTagCatalog } from '@/lib/problem-
 import { useAuth } from '@/components/auth/AuthProvider';
 import Link from 'next/link';
 import GenerationConfigFields from '@/components/problem-sets/GenerationConfigFields';
+import GenerationReadinessNotice from '@/components/problem-sets/GenerationReadinessNotice';
+import { useGenerationReadiness } from '@/lib/use-generation-readiness';
 import GenerationSlotCard from '@/components/problem-sets/GenerationSlotCard';
 import GenerationFailureNotice from '@/components/workflow/GenerationFailureNotice';
 import GenerationProgressNotice from '@/components/problem-sets/GenerationProgressNotice';
@@ -170,6 +172,8 @@ export default function ProblemSetDetailPage() {
 
 
   const generationActive = isSetGenerationActive(set?.generation?.status);
+  const showReadiness = canManage && (!generationActive || set?.generation?.status === 'queued');
+  const readiness = useGenerationReadiness(editGenerationConfig, showReadiness && Boolean(session));
   useEffect(() => {
     if (!id || !generationActive || !canManage) return;
     let cancelled = false;
@@ -236,6 +240,13 @@ export default function ProblemSetDetailPage() {
     };
     setSavingConfig(true); setError('');
     try {
+      if (startGeneration) {
+        const checked = await readiness.refresh();
+        if (!checked?.ready) {
+          setError(checked?.blockers.map((issue) => issue.message).join('；') || '生成前检查未通过，请查看提示或重新检查。');
+          return;
+        }
+      }
       const response = await updateProblemSet(id, payload);
       setSet(response.data ?? null);
       if (startGeneration) {
@@ -260,6 +271,11 @@ export default function ProblemSetDetailPage() {
     if (!canManage) return;
     setWorking(true); setError('');
     try {
+      const checked = await readiness.refresh();
+      if (!checked?.ready) {
+        setError(checked?.blockers.map((issue) => issue.message).join('；') || '生成前检查未通过，请查看提示或重新检查。');
+        return;
+      }
       const response = await startProblemSetGeneration(id);
       setSet((current) => current ? { ...current, generation: response.data } : current);
     } catch (cause) { setError(cause instanceof Error ? cause.message : '启动失败，请稍后重试。'); }
@@ -468,16 +484,19 @@ export default function ProblemSetDetailPage() {
             <p className="mt-1 text-sm text-anvil-500">{set.generation ? executionProgress ? generationProgressTitle(executionProgress) : setGenerationStatusLabel(set.generation.status) : set.generation_config?.assembly ? '本题集从已有题库组卷。缺题时可手工加入，或在确认需求后生成补齐。' : '填写下方需求并开始，系统会自动规划、生成、校验和入集。'}</p>
           </div>
           {generationActive ? <div className="flex gap-2">
-            {set.generation?.status === 'queued' && <button className="forge-btn-secondary" disabled={!canManage || working} onClick={() => void resumeQueuedGeneration()}>重新提交启动</button>}
+            {set.generation?.status === 'queued' && <button className="forge-btn-secondary" disabled={!canManage || working || !readiness.canStart} onClick={() => void resumeQueuedGeneration()}>重新提交启动</button>}
             <button className="forge-btn-secondary" disabled={!canManage || working || stopRequested} onClick={() => void stopGeneration()}>{stopRequested ? '正在停止…' : '停止生成'}</button>
-          </div> : <button className="forge-btn-primary" disabled={!canManage || working || savingConfig} onClick={() => { setDetailTab('generation'); void saveConfiguration(true); }}>
+          </div> : <button className="forge-btn-primary" disabled={!canManage || working || savingConfig || !readiness.canStart} onClick={() => { setDetailTab('generation'); void saveConfiguration(true); }}>
             {savingConfig ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
             {set.generation && set.generation.status !== 'completed' ? '保存并重试未完成题目' : set.generation_config?.assembly ? '保存需求并生成补齐' : '保存并开始生成'}
           </button>}
         </div>
         <p className="text-xs text-anvil-500">成功题目逐题保存。待审候选可先查看和修复；管理员人工审核后可恢复原题位。停止或失败后，重试只补齐未完成的题目。已有题目会计入题型配额，修改需求不会重写已入集的题目。</p>
+        {showReadiness && <GenerationReadinessNotice {...readiness} onRefresh={() => void readiness.refresh()} />}
         <GenerationProgressNotice progress={executionProgress} />
-        {set.generation?.error && <div className="text-danger-600"><GenerationFailureNotice error={set.generation.error} /></div>}
+        {set.generation?.error && (set.generation.status === 'cancelled'
+          ? <p className="text-sm text-anvil-500">{set.generation.error}</p>
+          : <div className="text-danger-600"><GenerationFailureNotice error={set.generation.error} /></div>)}
         {commonFailure && <section className="space-y-3 rounded-lg border border-warning-400/40 bg-warning-50 p-4 dark:bg-warning-500/10">
           <h3 className="font-semibold">共同原因：{commonFailure.count} 道未完成题目在同一阶段遇到相同问题</h3>
           <GenerationFailureNotice error="" summary={commonFailure.summary} />

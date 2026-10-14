@@ -55,6 +55,7 @@ import type {
   QuizProblem,
   ProblemSet,
   ProblemSetGenerationState,
+  ProblemSetGenerationReadiness,
   ProblemSetAssemblyRequest,
   ProblemSetAssembleRequest,
   ProblemSetAssemblyPreview,
@@ -837,6 +838,10 @@ export async function startProblemSetGeneration(id: string): Promise<APIResponse
 
 export async function getProblemSetGeneration(id: string): Promise<APIResponse<ProblemSetGenerationState | null>> {
   return request<ProblemSetGenerationState | null>(`/api/v1/problem-sets/${id}/generation`);
+}
+
+export async function getProblemSetGenerationReadiness(mode: 'programming' | 'mixed', programmingCount: number): Promise<APIResponse<ProblemSetGenerationReadiness>> {
+  return request<ProblemSetGenerationReadiness>(`/api/v1/problem-sets/generation-readiness${buildQueryString({ mode, programming_count: programmingCount })}`);
 }
 
 export async function cancelProblemSetGeneration(id: string): Promise<APIResponse<{ stop_requested: boolean }>> {

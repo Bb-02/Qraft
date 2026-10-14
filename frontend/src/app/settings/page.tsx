@@ -446,6 +446,10 @@ function ProviderCard({
 export default function SettingsPage() {
   const [settings, setSettings] = useState<PersistentLLMProviderSettings>();
   const [section, setSection] = useState<LLMProviderPurpose | 'embedding'>('statement');
+  useEffect(() => {
+    const requested = new URLSearchParams(window.location.search).get('section');
+    if (requested === 'statement' || requested === 'verification' || requested === 'review' || requested === 'embedding') setSection(requested);
+  }, []);
   const [forms, setForms] = useState<Record<LLMProviderPurpose, ProviderFormState>>({
     statement: { ...EMPTY_PROVIDER_FORM },
     verification: { ...EMPTY_PROVIDER_FORM },
@@ -729,7 +733,7 @@ export default function SettingsPage() {
 
   const sections = [
     { id: 'statement' as const, label: '生成模型', hint: settings?.statement.api_key_configured ? '已配置' : '开始配置', Icon: KeyRound },
-    { id: 'verification' as const, label: '独立验算', hint: overrideEnabled.verification ? '独立模型' : '跟随生成', Icon: ShieldCheck },
+    { id: 'verification' as const, label: '独立验算', hint: overrideEnabled.verification ? '单独配置' : '跟随生成', Icon: ShieldCheck },
     { id: 'review' as const, label: '质量评审', hint: overrideEnabled.review ? '独立模型' : '跟随验算', Icon: CheckCircle2 },
     { id: 'embedding' as const, label: '题库去重', hint: embeddingKeyConfigured ? '已配置' : '连接模型', Icon: Cpu },
   ];
@@ -769,7 +773,7 @@ export default function SettingsPage() {
           <div className="af-panel af-settings-panel" role="tabpanel" id="model-panel-verification" aria-labelledby="model-tab-verification" hidden={section !== 'verification'} tabIndex={0}><ProviderCard
                 purpose="verification"
                 title="独立验算"
-                description="验算题面、解法与结果。"
+                description="独立编写验算解法并检查结果。编程题集要求它与生成模型使用不同的模型名称和服务地址；关闭独立配置会跟随生成模型，无法满足这一要求。"
                 setting={settings?.verification}
                 form={forms.verification}
                 enabled={overrideEnabled.verification}
