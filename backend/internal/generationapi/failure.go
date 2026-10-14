@@ -14,7 +14,13 @@ func DescribeFailure(err error) *domain.GenerationFailure {
 		return nil
 	}
 	var application *temporal.ApplicationError
-	if errors.As(err, &application) && application.HasDetails() {
+	if errors.As(err, &application) {
+		if preflight := setGenerationPreflightFailure(application); preflight != nil {
+			preflight.TechnicalDetails = boundedFailureText(err.Error(), 6000)
+			return preflight
+		}
+	}
+	if application != nil && application.HasDetails() {
 		var failure domain.GenerationFailure
 		if application.Details(&failure) == nil && failure.Code != "" && failure.Message != "" {
 			failure.TechnicalDetails = boundedFailureText(failure.TechnicalDetails, 6000)
