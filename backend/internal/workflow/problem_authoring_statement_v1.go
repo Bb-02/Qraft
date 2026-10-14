@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/Gingoo-TvT/Qraft/backend/internal/domain"
@@ -179,20 +180,41 @@ func validateAuthoringStatementWorkflowResultV1(
 	if err := result.StatementDraftArtifact.Validate(result.StatementDraftArtifact.Bucket); err != nil {
 		return fmt.Errorf("invalid statement draft artifact ref: %w", err)
 	}
-	if len(result.SourceArtifacts) != 3 || result.SourceArtifacts[0] == nil ||
-		result.SourceArtifacts[1] == nil || result.SourceArtifacts[2] == nil {
-		return fmt.Errorf("statement draft result requires bundle, raw response, and draft artifacts")
+	if (len(result.SourceArtifacts) != 3 && len(result.SourceArtifacts) != 4) || result.SourceArtifacts[0] == nil {
+		return fmt.Errorf("statement draft result requires bundle, raw response, optional one presentation correction, and draft artifacts")
 	}
 	if !reflect.DeepEqual(result.SourceArtifacts[0], &in.BundleArtifact) {
 		return fmt.Errorf("statement draft ancestry does not begin with the exact authoring bundle ref")
 	}
-	if !authoringWorkflowIsSHA256V1(result.SourceArtifacts[1].SHA256) ||
-		result.SourceArtifacts[1].LLMCallReceipt == nil ||
-		!authoringWorkflowIsSHA256V1(result.SourceArtifacts[1].LLMCallReceipt.RequestSHA256) {
-		return fmt.Errorf("statement draft raw source lacks immutable request identity")
+	last := len(result.SourceArtifacts) - 1
+	for _, source := range result.SourceArtifacts[1:last] {
+		if source == nil || !authoringWorkflowIsSHA256V1(source.SHA256) || source.LLMCallReceipt == nil || !authoringWorkflowIsSHA256V1(source.LLMCallReceipt.RequestSHA256) {
+			return fmt.Errorf("statement draft raw source lacks immutable request identity")
+		}
 	}
-	if !reflect.DeepEqual(result.SourceArtifacts[2], result.StatementDraftArtifact) {
+	if !reflect.DeepEqual(result.SourceArtifacts[last], result.StatementDraftArtifact) {
 		return fmt.Errorf("statement draft ancestry does not end with the exact draft artifact ref")
+	}
+	if last == 3 {
+		for _, source := range result.SourceArtifacts[1:last] {
+			if err := source.Validate(result.StatementDraftArtifact.Bucket); err != nil {
+				return fmt.Errorf("statement presentation correction source ref is invalid: %w", err)
+			}
+			if source.WorkflowID != result.StatementDraftArtifact.WorkflowID || source.Producer != result.StatementDraftArtifact.Producer {
+				return fmt.Errorf("statement presentation correction belongs to a different workflow or producer")
+			}
+			receipt := source.LLMCallReceipt
+			if receipt.SchemaVersion != 1 || strings.TrimSpace(receipt.RequestedModel) == "" || receipt.Provider != source.Provider || !authoringWorkflowIsSHA256V1(receipt.EndpointID) || !authoringWorkflowIsSHA256V1(receipt.PromptHash) {
+				return fmt.Errorf("statement presentation correction source receipt is incomplete")
+			}
+		}
+		original, final := result.SourceArtifacts[1].LLMCallReceipt, result.SourceArtifacts[2].LLMCallReceipt
+		if original.PromptID != activities.AuthoringStatementPresentationPromptIDV2 || final.PromptID != activities.AuthoringStatementPresentationRepairPromptIDV2 || original.PromptVersion != "v2" || final.PromptVersion != "v2" || original.RequestSHA256 == final.RequestSHA256 {
+			return fmt.Errorf("statement presentation correction prompt identities are invalid")
+		}
+		if original.RequestedModel != final.RequestedModel || original.Provider != final.Provider || original.EndpointID != final.EndpointID {
+			return fmt.Errorf("statement presentation correction changed provider route")
+		}
 	}
 	return nil
 }

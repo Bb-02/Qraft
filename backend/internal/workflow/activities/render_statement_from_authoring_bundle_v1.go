@@ -167,42 +167,50 @@ func (a *Activities) RenderStatementFromAuthoringBundleActivityV1(
 	if err != nil {
 		return nil, fmt.Errorf("build statement narrative prompt: %w", err)
 	}
+	system, err := statementNarrativeSystemPromptV2()
+	if err != nil {
+		return nil, fmt.Errorf("build statement presentation constraints: %w", err)
+	}
 
 	temperature := 0.2
 	req := &llm.Request{
-		MaxTokens:   2048,
-		System:      statementNarrativeSystemPromptV1,
-		Temperature: &temperature,
-		Messages:    []llm.Message{{Role: "user", Content: prompt}},
+		MaxTokens:     2048,
+		System:        system,
+		PromptID:      AuthoringStatementPresentationPromptIDV2,
+		PromptVersion: "v2",
+		Temperature:   &temperature,
+		Messages:      []llm.Message{{Role: "user", Content: prompt}},
 	}
 	applyLLMRuntime(req, normalizedRuntime)
 
 	activity.RecordHeartbeat(ctx, "calling LLM for title and narrative")
 	stopHB := heartbeatWhile(ctx, "calling LLM for title and narrative", 15*time.Second)
-	response, sourceArtifact, err := a.completeLLMWithProvenance(ctx, "authoring_statement_v1", req, 2)
+	response, sourceArtifact, err := a.completeLLMWithProvenance(ctx, AuthoringStatementPresentationPromptIDV2, req, 2)
 	stopHB()
 	if err != nil {
 		return nil, wrapRequiredProviderEffectError("llm call for authoring statement narrative", err)
 	}
-	if response == nil {
-		return nil, nonRetryableStatementDraftContractErrorV1(fmt.Errorf("renderer returned a nil model response"))
+	if err := validateStatementPresentationResponseV2(response, sourceArtifact); err != nil {
+		return nil, err
 	}
-	if sourceArtifact == nil || sourceArtifact.LLMCallReceipt == nil ||
-		!statementDraftIsSHA256V1(sourceArtifact.SHA256) ||
-		!statementDraftIsSHA256V1(sourceArtifact.LLMCallReceipt.RequestSHA256) {
-		return nil, nonRetryableStatementDraftContractErrorV1(fmt.Errorf("renderer source artifact lacks immutable request identity"))
-	}
-
-	responseText := response.Text()
-	if len(responseText) > maxStatementNarrativeResponseBytesV1 {
-		return nil, nonRetryableStatementDraftContractErrorV1(fmt.Errorf("statement narrative response exceeds %d bytes", maxStatementNarrativeResponseBytesV1))
-	}
-	modelOutput, err := parseStatementNarrativeResponseV1(responseText)
-	if err != nil {
-		return nil, nonRetryableStatementDraftContractErrorV1(fmt.Errorf("parse statement narrative response: %w", err))
-	}
-	if err := lintStatementNarrativeAgainstFactsV1(*modelOutput, factManifest); err != nil {
-		return nil, nonRetryableStatementDraftContractErrorV1(err)
+	providerSources := []*ArtifactRef{sourceArtifact}
+	modelOutput, presentationErr := parseAndLintStatementPresentationV2(response, factManifest)
+	if presentationErr != nil {
+		repairRequest := statementPresentationRepairRequestV2(req, response, presentationErr)
+		stopHB = heartbeatWhile(ctx, "correcting statement presentation format", 15*time.Second)
+		response, sourceArtifact, err = a.completeLLMWithProvenance(ctx, AuthoringStatementPresentationRepairPromptIDV2, repairRequest, 2)
+		stopHB()
+		if err != nil {
+			return nil, wrapRequiredProviderEffectError("llm call for statement presentation correction", err)
+		}
+		if err := validateStatementPresentationResponseV2(response, sourceArtifact); err != nil {
+			return nil, err
+		}
+		providerSources = append(providerSources, sourceArtifact)
+		modelOutput, presentationErr = parseAndLintStatementPresentationV2(response, factManifest)
+		if presentationErr != nil {
+			return nil, nonRetryableStatementDraftContractErrorV1(fmt.Errorf("statement presentation is still invalid after one correction: %w", presentationErr))
+		}
 	}
 	modelOutputSHA, err := canonicalJSONSHA256(modelOutput)
 	if err != nil {
@@ -271,6 +279,8 @@ func (a *Activities) RenderStatementFromAuthoringBundleActivityV1(
 	}
 
 	bundleRef := in.BundleArtifact
+	sourceArtifacts := append([]*ArtifactRef{&bundleRef}, providerSources...)
+	sourceArtifacts = append(sourceArtifacts, draftArtifact)
 	return &RenderStatementFromAuthoringBundleResult{
 		PayloadVersion:         RenderStatementFromAuthoringBundlePayloadVersion,
 		RendererInputSHA256:    rendererInputSHA,
@@ -282,7 +292,7 @@ func (a *Activities) RenderStatementFromAuthoringBundleActivityV1(
 		MarkdownSHA256:         markdownSHA,
 		StatementDraftSHA256:   draftSHA,
 		StatementDraftArtifact: draftArtifact,
-		SourceArtifacts:        []*ArtifactRef{&bundleRef, sourceArtifact, draftArtifact},
+		SourceArtifacts:        sourceArtifacts,
 	}, nil
 }
 
