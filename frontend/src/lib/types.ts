@@ -356,6 +356,7 @@ export interface WorkflowState {
   };
   // Present when workflow has failed — extracted from Temporal history
   failure_reason?: string;
+  failure?: import('./generation-failure').GenerationFailure;
   // Used by workflow visualization components (WorkflowCanvas)
   steps?: WorkflowStep[];
 }
@@ -1074,7 +1075,14 @@ export interface ProblemSetGenerationSlot {
   score: number;
   title?: string;
   status: string;
+  difficulty?: number;
+  difficulty_assessment?: import('./generation-difficulty').GenerationDifficultyAssessment;
+  regenerate?: boolean;
+  child_id?: string;
+  problem_id?: string;
+  quiz_id?: string;
   error?: string;
+  failure?: import('./generation-failure').GenerationFailure;
 }
 
 export interface ProblemSetGenerationState {

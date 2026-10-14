@@ -7,12 +7,13 @@ import { useRouter } from 'next/navigation';
 
 import { FormSection, PageHeader } from '@/components/ui/Workspace';
 import GenerationConfigFields from '@/components/problem-sets/GenerationConfigFields';
+import GenerationFailureNotice from '@/components/workflow/GenerationFailureNotice';
 import { defaultSetGenerationConfig, SET_QUESTION_TYPES, setGenerationTotal, validateSetGenerationConfig } from '@/lib/problem-set-generation';
 import { createProblemSet } from '@/lib/api';
 import type { ProblemSetCreateRequest, ProblemSetKind } from '@/lib/types';
 
-const DEFAULT_STYLE = '像天梯赛一样循序渐进，题面清晰、叙事克制，覆盖不同算法范式；最后保留 1-2 道真正需要综合思考的题。';
-const DEFAULT_DIFFICULTY = '整体中等偏上，前段让基础选手有稳定得分点，后段达到区域赛银牌附近的思维强度，难度要有明显梯度。';
+const DEFAULT_STYLE = '题面清晰、叙事克制，按整套需求安排题目风格、知识覆盖和顺序。';
+const DEFAULT_DIFFICULTY = '按整套需求和适用选手水平安排难度与梯度，优先满足明确指定的难度范围。';
 
 export default function NewProblemSetPage() {
   const router = useRouter();
@@ -93,7 +94,7 @@ export default function NewProblemSetPage() {
         actions={<Link href="/problem-sets/assemble" className="forge-btn-secondary">从已有题目组卷</Link>}>
         <Link href="/problem-sets" className="af-link inline-flex items-center gap-1"><ArrowLeft className="h-4 w-4" />返回题集</Link>
       </PageHeader>
-      {error && <div role="alert" className="rounded-lg border border-danger-400/30 bg-danger-50 p-4 text-sm text-danger-600 dark:bg-danger-500/10 dark:text-danger-400">{error}</div>}
+      {error && <div role="alert" className="rounded-lg border border-danger-400/30 bg-danger-50 p-4 text-sm text-danger-600 dark:bg-danger-500/10 dark:text-danger-400"><GenerationFailureNotice error={error} /></div>}
       <form className="af-form-layout" onSubmit={(event) => void submit(event)}>
         <div className="af-form-main">
           <FormSection number="01" title="这套题要解决什么问题" description="先说明对象、目标与内容范围，再细化题目组成。">
@@ -104,14 +105,14 @@ export default function NewProblemSetPage() {
             <label className="af-field"><span>整套需求</span><textarea className="forge-input min-h-40" maxLength={12000} value={generationConfig.requirements} onChange={(event) => setGenerationConfig((current) => ({ ...current, requirements: event.target.value }))} placeholder="例如：面向完成基础课程的学生，用两小时检验图论、动态规划和字符串知识；基础题保证稳定得分，综合题强调观察与建模。" /><span className="af-hint">可以写考试时长、适用水平、考查重点，以及题目之间需要满足的关系。</span></label>
             <div className="grid gap-4 sm:grid-cols-2">
               <label className="af-field"><span>学科 / 方向</span><input className="forge-input" value={subject} onChange={(event) => setSubject(event.target.value)} /></label>
-              <label className="af-field"><span>覆盖标签</span><input className="forge-input" value={tags} onChange={(event) => setTags(event.target.value)} placeholder="图论，动态规划，字符串" /><span className="af-hint">多个标签使用逗号分隔。</span></label>
+              <label className="af-field"><span>覆盖标签</span><input className="forge-input" value={tags} onChange={(event) => setTags(event.target.value)} placeholder="图论，动态规划，字符串" /><span className="af-hint">多个标签使用逗号分隔。标签描述知识范围，思维难度以整套需求为准。</span></label>
             </div>
           </FormSection>
           <FormSection number="02" title="题型与配比" description="选择纯编程比赛，或为不同题型分别设置数量与分值。">
             <GenerationConfigFields value={generationConfig} onChange={setGenerationConfig} showRequirements={false} />
           </FormSection>
           <FormSection number="03" title="难度与表达" description="这些要求会用于整套规划，帮助题目形成一致的体验。">
-            <label className="af-field"><span>难度描述</span><textarea className="forge-input min-h-28" value={difficulty} onChange={(event) => setDifficulty(event.target.value)} /></label>
+            <label className="af-field"><span>难度描述</span><textarea className="forge-input min-h-28" value={difficulty} onChange={(event) => setDifficulty(event.target.value)} /><span className="af-hint">可以指定目标范围和梯度，例如 CF 400–1400。生成后展示独立难度预估与偏差，偏差供你校准和取舍。</span></label>
             <label className="af-field"><span>风格描述</span><textarea className="forge-input min-h-28" value={style} onChange={(event) => setStyle(event.target.value)} /></label>
           </FormSection>
           <details className="af-form-details">

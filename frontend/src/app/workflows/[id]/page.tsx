@@ -19,7 +19,8 @@ import {
 import { PageHeader, SectionHeading } from '@/components/ui/Workspace';
 import RefreshButton from '@/components/RefreshButton';
 import SimilarityPanel from '@/components/workflow/SimilarityPanel';
-import ProviderFailureNotice from '@/components/workflow/ProviderFailureNotice';
+import GenerationFailureNotice from '@/components/workflow/GenerationFailureNotice';
+import { generationStepLabel } from '@/lib/generation-failure';
 import {
   useWorkflow,
   useWorkflowActions,
@@ -77,9 +78,13 @@ function EventLog({ events }: { events: WorkflowEvent[] }) {
           >
             {EVENT_TYPE_LABELS[event.type] ?? event.type}
           </span>
-          <span className="flex-1 text-anvil-600 dark:text-anvil-300">
-            {event.message ?? event.step_name ?? '-'}
-          </span>
+          <div className="min-w-0 flex-1 text-anvil-600 dark:text-anvil-300">
+            {event.type === 'step_failed' || event.type === 'workflow_failed'
+              ? <GenerationFailureNotice context="workflow" error={event.message || '生成未完成，请查看任务详情。'} />
+              : event.message && event.step_name && event.message.startsWith(event.step_name)
+                ? generationStepLabel(event.step_name) + event.message.slice(event.step_name.length)
+                : event.message || generationStepLabel(event.step_name || '-')}
+          </div>
         </div>
       ))}
     </div>
@@ -344,12 +349,12 @@ export default function WorkflowDetailPage() {
       {/* Action error */}
       {actionError && (
         <div className="rounded-lg border border-danger-400/30 bg-danger-50 p-4 text-sm text-danger-600 dark:bg-danger-500/10 dark:text-danger-400">
-          {actionError}
+          <GenerationFailureNotice context="workflow" error={actionError} />
         </div>
       )}
 
       {/* Failure reason */}
-      {workflow.failure_reason && (
+      {(workflow.failure_reason || workflow.failure) && (
         <div className="rounded-lg border border-danger-400/30 bg-danger-50 p-4 dark:bg-danger-500/10">
           <div className="flex items-start gap-2">
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-danger-500" />
@@ -357,10 +362,7 @@ export default function WorkflowDetailPage() {
               <p className="text-sm font-medium text-danger-600 dark:text-danger-400">
                 工作流失败原因
               </p>
-              <p className="mt-1 whitespace-pre-wrap break-words font-mono text-xs text-danger-600 dark:text-danger-400">
-                {workflow.failure_reason}
-              </p>
-              <ProviderFailureNotice failure={workflow.failure_reason} />
+              <div className="mt-2 text-danger-600 dark:text-danger-400"><GenerationFailureNotice context="workflow" error={workflow.failure_reason || ''} failure={workflow.failure} /></div>
             </div>
           </div>
         </div>
@@ -373,7 +375,7 @@ export default function WorkflowDetailPage() {
           <SectionHeading title="执行步骤" description={workflow.steps.filter(step => step.status === 'completed').length + ' / ' + workflow.steps.length + ' 步已完成'} />
           <ol className="af-step-timeline">{workflow.steps.map((step, index) => <li key={index} className={'is-' + step.status}>
             <span className="af-step-dot">{step.status === 'completed' ? <Check size={15} /> : index + 1}</span>
-            <div><strong>{step.description || step.name}</strong>{step.result?.message && <p>{step.result.message}</p>}</div><small>{stepLabels[step.status] ?? step.status}</small>
+            <div><strong>{step.description || generationStepLabel(step.name)}</strong>{step.result?.message && (step.status === 'failed' ? <GenerationFailureNotice context="workflow" error={step.result.message} /> : <p>{step.result.message}</p>)}</div><small>{stepLabels[step.status] ?? step.status}</small>
           </li>)}</ol>
         </section>}
         <section className="af-panel">

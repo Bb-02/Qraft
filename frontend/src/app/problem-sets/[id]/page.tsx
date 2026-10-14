@@ -4,29 +4,35 @@ import { downloadProblemSetTesting, parseExportTagCatalog } from '@/lib/problem-
 import { useAuth } from '@/components/auth/AuthProvider';
 import Link from 'next/link';
 import GenerationConfigFields from '@/components/problem-sets/GenerationConfigFields';
+import GenerationSlotCard from '@/components/problem-sets/GenerationSlotCard';
+import GenerationFailureNotice from '@/components/workflow/GenerationFailureNotice';
 import { defaultSetGenerationConfig, generationConfigForSet, isSetGenerationActive, SET_QUESTION_TYPES, setGenerationStatusLabel, setGenerationTotal, validateSetGenerationConfig } from '@/lib/problem-set-generation';
 import { ViewTabs, ViewPanel } from '@/components/ui/ViewTabs';
 import { useParams } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, ArrowUp, ArrowDown, Download, Loader2, RefreshCw, Save, Sparkles, Trash2 } from 'lucide-react';
+import { ArrowLeft, ArrowUp, ArrowDown, Download, ExternalLink, Loader2, RefreshCw, Save, ShieldCheck, Sparkles, Trash2 } from 'lucide-react';
 
 import {
   addProblemSetItem,
+  approveProblemPublicRelease,
   startProblemSetGeneration,
   getProblemSetGeneration,
   cancelProblemSetGeneration,
   generateProblemSetPrompt,
   getProblemSet,
+  getProblem,
   listProblems,
   listQuizzes,
   removeProblemSetItem,
   reorderProblemSetItems,
+  resumeProblemSetGenerationSlot,
   updateProblemSet,
 } from '@/lib/api';
 import type {
   Problem,
   ProblemSet,
   ProblemSetAddItemRequest,
+  ProblemSetGenerationSlot,
   ProblemSetUpdateRequest,
   QuizProblem,
 } from '@/lib/types';
@@ -83,6 +89,11 @@ export default function ProblemSetDetailPage() {
   const [editGenerationConfig, setEditGenerationConfig] = useState(defaultSetGenerationConfig);
   const [stopRequested, setStopRequested] = useState(false);
   const [progressError, setProgressError] = useState('');
+  const [reviewCandidate, setReviewCandidate] = useState<{ slot: ProblemSetGenerationSlot; problem: Problem } | null>(null);
+  const [reviewNote, setReviewNote] = useState('');
+  const [reviewConfirmed, setReviewConfirmed] = useState(false);
+  const [reviewApproved, setReviewApproved] = useState(false);
+  const [reviewError, setReviewError] = useState('');
   const [editCooldown, setEditCooldown] = useState(2);
   const [generateOnSave, setGenerateOnSave] = useState(false);
   const [sourceType, setSourceType] = useState<'problem' | 'quiz'>('problem');
@@ -249,6 +260,41 @@ export default function ProblemSetDetailPage() {
     finally { setWorking(false); }
   }
 
+  async function openCandidateReview(slot: ProblemSetGenerationSlot) {
+    if (!isAdmin || !slot.problem_id || slot.regenerate || generationActive) return;
+    setWorking(true); setError('');
+    try {
+      const response = await getProblem(slot.problem_id);
+      if (!response.data) throw new Error('候选题目暂时无法读取，请刷新后重试。');
+      setReviewCandidate({ slot, problem: response.data });
+      setReviewApproved(response.data.status === 'published' && response.data.metadata_json?.manual_release_approval != null);
+      setReviewNote(''); setReviewConfirmed(false); setReviewError('');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '候选题目加载失败');
+    } finally { setWorking(false); }
+  }
+
+  async function approveAndResumeCandidate() {
+    if (!isAdmin || !reviewCandidate || reviewCandidate.slot.regenerate || (!reviewApproved && (!reviewConfirmed || !reviewNote.trim())) || generationActive) return;
+    setWorking(true); setReviewError('');
+    try {
+      const { slot, problem } = reviewCandidate;
+      if (!reviewApproved) {
+        await approveProblemPublicRelease(problem.id, {
+          approved: true, override_quality: true,
+          expected_updated_at: problem.updated_at, note: reviewNote.trim(),
+        });
+        setReviewApproved(true);
+      }
+      await resumeProblemSetGenerationSlot(id, slot.position);
+      setReviewCandidate(null);
+      await load();
+      setDetailTab('generation');
+    } catch (cause) {
+      setReviewError(cause instanceof Error ? cause.message : '人工审核或加入题集失败，请查看候选题目后重试。');
+    } finally { setWorking(false); }
+  }
+
   async function moveItem(index: number, delta: number) {
     if (!canManage) return;
     const ids = items.map((item) => item.id);
@@ -289,7 +335,7 @@ export default function ProblemSetDetailPage() {
   useEffect(() => {
     if (!set || initialViewChosen.current) return;
     initialViewChosen.current = true;
-    if (canManage && isSetGenerationActive(set.generation?.status)) setDetailTab('generation');
+    if (canManage && set.generation && (isSetGenerationActive(set.generation.status) || set.generation.status !== 'completed')) setDetailTab('generation');
   }, [set, canManage]);
 
   if (loading && !set) return <div className="forge-page"><p className="text-anvil-500">加载中…</p></div>;
@@ -337,7 +383,7 @@ export default function ProblemSetDetailPage() {
   </div>
 </details>
 {!canManage && <p className="rounded-lg border border-[var(--dl)] p-3 text-sm text-[var(--dm)]">这是团队共享题集。你可以查看与导出；修改由管理员统一管理。</p>}
-{error && <div className="rounded-lg border border-danger-400/30 bg-danger-50 p-4 text-sm text-danger-600">{error}</div>}
+{error && <div role="alert" className="rounded-lg border border-danger-400/30 bg-danger-50 p-4 text-sm text-danger-600"><GenerationFailureNotice error={error} /></div>}
       <ViewTabs id="set-content" value={detailTab} onChange={setDetailTab} items={[
         { id: 'items', label: '题目目录（' + items.length + '）' }, ...(canManage ? [{ id: 'generation', label: '生成进度' }] : []),
         { id: 'settings', label: '题集需求' }, { id: 'quality', label: '质量与去重' },
@@ -418,19 +464,16 @@ export default function ProblemSetDetailPage() {
             {set.generation && set.generation.status !== 'completed' ? '保存并重试未完成题目' : set.generation_config?.assembly ? '保存需求并生成补齐' : '保存并开始生成'}
           </button>}
         </div>
-        <p className="text-xs text-anvil-500">成功题目逐题保存。可关闭页面后再查看；停止或失败后，重试只补齐未完成的题目。已有题目会计入题型配额，修改需求不会重写已入集的题目。</p>
+        <p className="text-xs text-anvil-500">成功题目逐题保存。待审候选可先查看和修复；管理员人工审核后可恢复原题位。停止或失败后，重试只补齐未完成的题目。已有题目会计入题型配额，修改需求不会重写已入集的题目。</p>
         {progressError && <p className="text-sm text-warning-600">{progressError}</p>}
-        {set.generation?.error && <p className="text-sm text-danger-600">{set.generation.error}</p>}
+        {set.generation?.error && <div className="text-danger-600"><GenerationFailureNotice error={set.generation.error} /></div>}
         {set.generation && <>
           <div className="flex items-center gap-3 text-sm">
             <progress className="h-2 flex-1 accent-forge-500" max={set.generation.slots.length || 1} value={set.generation.slots.filter((slot) => slot.status === 'succeeded').length} />
             <span>{set.generation.slots.filter((slot) => slot.status === 'succeeded').length} / {set.generation.slots.length} 已完成</span>
           </div>
-          <div className="max-h-72 space-y-2 overflow-auto">
-            {set.generation.slots.map((slot) => <div key={slot.position} className="rounded-lg border border-anvil-200 p-3 text-sm dark:border-anvil-700">
-              <div className="flex flex-wrap justify-between gap-2"><span>#{slot.position} · {SET_QUESTION_TYPES.find((t) => t.type === slot.type)?.label} · {slot.title || '等待规划'}</span><span className={slot.status === 'failed' ? 'text-danger-600' : slot.status === 'succeeded' ? 'text-success-700' : 'text-anvil-500'}>{setGenerationStatusLabel(slot.status)}</span></div>
-              {slot.error && slot.status === 'failed' && <p className="mt-1 text-xs text-danger-600">{slot.error}</p>}
-            </div>)}
+          <div className="max-h-[32rem] space-y-2 overflow-auto">
+            {set.generation.slots.map(slot => <GenerationSlotCard key={slot.position} slot={slot} isAdmin={isAdmin} busy={working || generationActive || savingConfig} onReview={candidate => void openCandidateReview(candidate)} />)}
           </div>
         </>}
       </section><section className="forge-card">
@@ -481,6 +524,21 @@ export default function ProblemSetDetailPage() {
         <p className="text-xs text-anvil-500">上方 ZIP 用于 OJ 测试，按实际数据验证结果提供下载；这里的正式发布要求不会自动改变题目的状态。</p>
       </section></ViewPanel>
 
+      {reviewCandidate && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+        <section role="dialog" aria-modal="true" aria-labelledby="candidate-review-title" className="max-h-[90vh] w-full max-w-lg space-y-4 overflow-auto rounded-xl bg-white p-6 shadow-xl dark:bg-anvil-900">
+          <h2 id="candidate-review-title" className="text-lg font-semibold">人工审核第 {reviewCandidate.slot.position} 题</h2>
+          <p className="font-medium">{reviewCandidate.problem.title}</p>
+          <p className="text-sm text-anvil-600 dark:text-anvil-300">请先在候选详情中核对题意、参考解法和测试数据。审核通过会记录你的决定和未通过项，并尝试将这道候选加入原题位。缺少测试数据或资产验证失败时，需修复后继续。</p>
+          <Link href={'/problems/' + encodeURIComponent(reviewCandidate.problem.id)} className="af-link inline-flex items-center gap-1"><ExternalLink size={15} />打开候选详情</Link>
+          {reviewCandidate.slot.failure && <GenerationFailureNotice error={reviewCandidate.slot.error || ''} failure={reviewCandidate.slot.failure} />}
+          {reviewApproved ? <p className="text-sm text-success-700">人工审核已记录。可以继续尝试将这道题加入原题位。</p> : <>
+            <label className="af-field"><span>审核说明 *</span><textarea className="forge-input min-h-24" maxLength={2000} value={reviewNote} disabled={working} onChange={event => setReviewNote(event.target.value)} placeholder="说明你检查了哪些内容，以及接受当前未通过项的原因。" /></label>
+            <label className="flex items-start gap-2 text-sm"><input className="mt-1" type="checkbox" checked={reviewConfirmed} disabled={working} onChange={event => setReviewConfirmed(event.target.checked)} /><span>我已核对这道候选题的内容和自动检查结果，确认可以人工审核通过。</span></label>
+          </>}
+          {reviewError && <div role="alert" className="text-danger-600"><GenerationFailureNotice error={reviewError} /></div>}
+          <div className="flex justify-end gap-3"><button className="forge-btn-secondary" disabled={working} onClick={() => setReviewCandidate(null)}>取消</button><button className="forge-btn-primary" disabled={working || (!reviewApproved && (!reviewConfirmed || !reviewNote.trim()))} onClick={() => void approveAndResumeCandidate()}>{working ? <Loader2 size={16} className="animate-spin" /> : <ShieldCheck size={16} />}{reviewApproved ? '恢复原题位' : '审核通过并恢复原题位'}</button></div>
+        </section>
+      </div>}
     </div>
   );
 }

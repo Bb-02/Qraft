@@ -44,7 +44,7 @@ export function setGenerationStatusLabel(status: string): string {
   const labels: Record<string, string> = {
     queued: '等待启动', planning: '规划整套题目', generating: '生成与校验中', completed: '全部完成',
     partial: '部分完成', cancelled: '已停止', failed: '生成失败',
-    pending: '待生成', ready: '已规划', running: '生成与校验中', generated: '正在入集', succeeded: '已完成',
+    pending: '待生成', ready: '已规划', running: '生成与校验中', generated: '正在入集', succeeded: '已完成', awaiting_review: '等待人工审核',
   };
   return labels[status] || status;
 }

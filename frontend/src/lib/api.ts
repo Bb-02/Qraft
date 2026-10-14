@@ -843,6 +843,10 @@ export async function cancelProblemSetGeneration(id: string): Promise<APIRespons
   return request<{ stop_requested: boolean }>(`/api/v1/problem-sets/${id}/generation/cancel`, { method: 'POST' });
 }
 
+export async function resumeProblemSetGenerationSlot(id: string, position: number): Promise<APIResponse<ProblemSetGenerationState>> {
+  return request<ProblemSetGenerationState>(`/api/v1/problem-sets/${id}/generation/slots/${position}/resume`, { method: 'POST' });
+}
+
 export async function addProblemSetItem(
   id: string,
   payload: ProblemSetAddItemRequest,

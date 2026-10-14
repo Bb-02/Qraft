@@ -59,6 +59,7 @@ import {
 import { getDifficultyLabel, STATUS_LABELS } from '@/lib/constants';
 import ProblemRating from '@/components/rating/ProblemRating';
 import MarkdownRenderer from '@/components/MarkdownRenderer';
+import GenerationDifficultyNotice from '@/components/problem-sets/GenerationDifficultyNotice';
 
 // ---------------------------------------------------------------------------
 // Dynamic imports for heavy components
@@ -693,6 +694,7 @@ export default function ProblemDetailPage() {
               {problem.memory_limit}MB
             </span>
           </div>
+          <GenerationDifficultyNotice assessment={problem.metadata_json?.generation_difficulty} />
           {/* Tags */}
           <div className="flex flex-wrap gap-2">
             {problem.tags.map((tag) => (
