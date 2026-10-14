@@ -20,8 +20,12 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	enumspb "go.temporal.io/api/enums/v1"
+	taskqueuepb "go.temporal.io/api/taskqueue/v1"
+	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/mocks"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func TestProblemSetCreateStartRecoveryHTTPIntegration(t *testing.T) {
@@ -46,6 +50,17 @@ func TestProblemSetCreateStartRecoveryHTTPIntegration(t *testing.T) {
 		return &domain.ProviderRuntimeConfig{}, nil
 	}
 	generation := service.NewProblemSetGenerationService(sets, repo, nil, nil, temporalClient, "set-test-queue", resolver)
+	generation.SetGenerationReadiness(service.ProblemSetGenerationReadinessOptions{
+		Providers: func(context.Context, bool) (*domain.ProviderRuntimeConfig, error) {
+			g := &domain.LLMRuntimeConfig{Model: "synthetic-generator", Provider: "fixture", BaseURL: "https://generator.invalid/v1"}
+			v := &domain.LLMRuntimeConfig{Model: "synthetic-verifier", Provider: "fixture", BaseURL: "https://verifier.invalid/v1"}
+			return &domain.ProviderRuntimeConfig{Statement: g, Verification: v, Review: v}, nil
+		},
+		Sandbox: func(context.Context) (bool, error) { return true, nil },
+	})
+	for _, typ := range []enumspb.TaskQueueType{enumspb.TASK_QUEUE_TYPE_WORKFLOW, enumspb.TASK_QUEUE_TYPE_ACTIVITY} {
+		temporalClient.On("DescribeTaskQueue", mock.Anything, "set-test-queue", typ).Return(&workflowservice.DescribeTaskQueueResponse{Pollers: []*taskqueuepb.PollerInfo{{LastAccessTime: timestamppb.Now()}}}, nil)
+	}
 	h := NewProblemSetHandler(sets)
 	h.SetGenerationService(generation)
 	e := echo.New()

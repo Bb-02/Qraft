@@ -64,8 +64,9 @@ func TestProblemSetPreparationIsolatesInvalidTargetsIntegration(t *testing.T) {
 		return nil
 	}))
 	runtime := &domain.LLMRuntimeConfig{Model: "fixture", APIKeyRef: "runtime:synthetic-set", BaseURL: "https://example.test", Provider: "fixture", Protocol: "openai-chat"}
+	verificationRuntime := &domain.LLMRuntimeConfig{Model: "independent-fixture", APIKeyRef: "runtime:synthetic-verifier", BaseURL: "https://verifier.example.test", Provider: "fixture", Protocol: "openai-chat"}
 	svc := NewProblemSetGenerationService(sets, repo, problems, tags, nil, "", func(context.Context) (*domain.ProviderRuntimeConfig, error) {
-		return &domain.ProviderRuntimeConfig{Statement: runtime, Verification: runtime, Review: runtime}, nil
+		return &domain.ProviderRuntimeConfig{Statement: runtime, Verification: verificationRuntime, Review: verificationRuntime}, nil
 	})
 	suite := &testsuite.WorkflowTestSuite{}
 	env := suite.NewTestActivityEnvironment()

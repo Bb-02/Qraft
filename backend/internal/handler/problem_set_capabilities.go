@@ -59,7 +59,7 @@ func problemSetCapabilities(generationEnabled, exportEnabled bool, generationFla
 		},
 	}
 	if generationEnabled {
-		c.Generation.Routes = []string{"POST /api/v1/problem-sets/:id/generation", "GET /api/v1/problem-sets/:id/generation", "POST /api/v1/problem-sets/:id/generation/cancel"}
+		c.Generation.Routes = []string{"GET /api/v1/problem-sets/generation-readiness", "POST /api/v1/problem-sets/:id/generation", "GET /api/v1/problem-sets/:id/generation", "POST /api/v1/problem-sets/:id/generation/cancel"}
 	}
 	if exportEnabled {
 		c.Export.Routes = []string{"GET /api/v1/problem-sets/:id/export.zip", "POST /api/v1/problem-sets/:id/export.zip"}

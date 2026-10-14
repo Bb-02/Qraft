@@ -179,13 +179,20 @@ func TestSetRuntimeQueuedRetryDoesNotReusePreviousAttemptStart(t *testing.T) {
 	require.Equal(t, int32(2), result.Attempt)
 }
 
-func TestSetRuntimeStartReturnsSubmittedObservationWithoutRejectingQueue(t *testing.T) {
+func TestSetRuntimeStartReturnsSubmittedObservationAfterReadinessCheck(t *testing.T) {
 	svc, repo, client, _ := setRuntimeFixture("queued")
 	repo.set.DesiredItemCount = 1
 	repo.set.GenerationConfig = &domain.ProblemSetGenerationConfig{Mode: "programming", Distribution: []domain.ProblemSetTypeQuota{{Type: domain.QuizTypeProgramming, Count: 1, Score: 100}}}
 	svc.resolve = func(context.Context) (*domain.ProviderRuntimeConfig, error) {
 		return &domain.ProviderRuntimeConfig{}, nil
 	}
+	svc.SetGenerationReadiness(ProblemSetGenerationReadinessOptions{
+		Providers: func(context.Context, bool) (*domain.ProviderRuntimeConfig, error) {
+			return readinessProvidersFixture(), nil
+		},
+		Sandbox: func(context.Context) (bool, error) { return true, nil },
+	})
+	mockReadinessWorkers(client, svc.queue, readyPollersFixture(), nil)
 	svc.SetRuntimeWarningsResolver(func(context.Context) ([]string, error) { return []string{"当前未配置向量服务"}, nil })
 	client.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil, nil).Once()
 	result, err := svc.Start(context.Background(), repo.set.ID)
@@ -194,7 +201,6 @@ func TestSetRuntimeStartReturnsSubmittedObservationWithoutRejectingQueue(t *test
 	require.Equal(t, []string{"当前未配置向量服务"}, result.Runtime.Warnings)
 	require.Nil(t, repo.set.Generation.Runtime)
 	require.Equal(t, repo.set.Generation.ID, result.ID)
-	client.AssertNotCalled(t, "DescribeTaskQueue", mock.Anything, mock.Anything, mock.Anything)
 	client.AssertExpectations(t)
 }
 

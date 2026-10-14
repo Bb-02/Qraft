@@ -266,6 +266,13 @@ func main() {
 	problemSetHandler := handler.NewProblemSetHandler(problemSetService)
 	if generationAPIMode.ProductRouteEnabled {
 		setGeneration := service.NewProblemSetGenerationService(problemSetService, problemSetRepo, problemService, tagRepo, temporalClient, cfg.Temporal.TaskQueue, service.NewProblemSetProviderResolver(llmSettingsHandler, runtimeKeyStore))
+		readinessOptions := service.ProblemSetGenerationReadinessOptions{
+			Providers:        service.NewProblemSetReadinessProviderResolver(llmSettingsHandler),
+			Sandbox:          service.NewProblemSetSandboxReadinessProbe(os.Getenv("SANDBOX_URL")),
+			EmbeddingEnabled: cfg.Embedding.Enabled, FallbackBaseURL: cfg.Anthropic.BaseURL,
+		}
+		setGeneration.SetGenerationProviderResolver(service.NewProblemSetProviderResolverForMode(llmSettingsHandler, runtimeKeyStore, readinessOptions))
+		setGeneration.SetGenerationReadiness(readinessOptions)
 		setGeneration.SetRuntimeWarningsResolver(func(context.Context) ([]string, error) {
 			if !cfg.Embedding.Enabled {
 				return []string{"当前未配置向量服务，新生成题目将不做相似题去重；题集内重复内容仍会检查。"}, nil

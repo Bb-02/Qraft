@@ -36,6 +36,9 @@ func (h *ProblemSetHandler) HandleCreate(c echo.Context) error {
 		if h.generation == nil {
 			return serviceUnavailable(c, "题集自动生成未启用")
 		}
+		if err := h.requireCreateGenerationReadiness(c.Request().Context(), req); err != nil {
+			return handleProblemSetError(c, err, "题集生成条件尚未满足")
+		}
 		req.GeneratePrompt = false
 	}
 	req.CreatedBy = editActor(c)
@@ -278,6 +281,7 @@ func (h *ProblemSetHandler) HandleExport(c echo.Context) error {
 // export handler fails closed with a clear service-unavailable response when
 // a required programming asset is unavailable or fails verification.
 func RegisterProblemSetRoutes(group *echo.Group, handler *ProblemSetHandler) {
+	group.GET("/problem-sets/generation-readiness", handler.HandleGenerationReadiness)
 	if handler.generation != nil {
 		group.POST("/problem-sets/:id/generation", handler.HandleStartGeneration)
 		group.GET("/problem-sets/:id/generation", handler.HandleGenerationStatus)
@@ -321,6 +325,10 @@ func qualityHeader(quality *domain.ProblemSetQuality) string {
 func handleProblemSetError(c echo.Context, err error, prefix string) error {
 	if err == nil {
 		return nil
+	}
+	var notReady *service.ProblemSetGenerationNotReadyError
+	if errors.As(err, &notReady) {
+		return generationNotReadyResponse(c, notReady)
 	}
 	if errors.Is(err, service.ErrNotFound) || errors.Is(err, sql.ErrNoRows) {
 		return notFound(c, "problem set not found")

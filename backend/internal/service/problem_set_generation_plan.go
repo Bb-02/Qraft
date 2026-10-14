@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -50,9 +51,19 @@ func (s *ProblemSetGenerationService) PrepareProblemSetBatchActivity(ctx context
 	}); err != nil {
 		return nil, err
 	}
-	providers, err := s.resolve(ctx)
+	providers, err := s.resolveSetGenerationProviders(ctx, set.GenerationConfig)
 	if err != nil {
+		var notReady *ProblemSetGenerationNotReadyError
+		if errors.As(err, &notReady) {
+			return nil, temporal.NewNonRetryableApplicationError(notReady.Error(), "SetGenerationPreflightError", nil, notReady.Readiness)
+		}
 		return nil, err
+	}
+	readiness := s.assessSetGenerationConfiguredProviders(providers, setHasProgrammingQuestions(set.GenerationConfig))
+	if !readiness.Ready {
+		return nil, temporal.NewNonRetryableApplicationError(
+			(&ProblemSetGenerationNotReadyError{Readiness: readiness}).Error(), "SetGenerationPreflightError", nil, readiness,
+		)
 	}
 	if state.Brief == "" {
 		response, err := s.completeSetPlanning(ctx, providers.Statement, problemSetPromptSystem, s.sets.buildPromptInput(ctx, set), 4096)

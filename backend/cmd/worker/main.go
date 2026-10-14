@@ -280,6 +280,12 @@ func main() {
 	setService := service.NewProblemSetService(setRepo, setProblems, setQuizzes, service.NewHydroExportService(setProblems, setObjects), llmClient)
 	setSettings := handler.NewLLMSettingsHandler(repository.NewLLMProviderSettingsRepository(dbPool), settingsCipher, cfg.Anthropic)
 	setGeneration := service.NewProblemSetGenerationService(setService, setRepo, setProblems, setTags, temporalClient, cfg.Temporal.TaskQueue, service.NewProblemSetProviderResolver(setSettings, runtimeKeyStore))
+	setReadinessOptions := service.ProblemSetGenerationReadinessOptions{
+		Providers:        service.NewProblemSetReadinessProviderResolver(setSettings),
+		EmbeddingEnabled: cfg.Embedding.Enabled, FallbackBaseURL: cfg.Anthropic.BaseURL,
+	}
+	setGeneration.SetGenerationProviderResolver(service.NewProblemSetProviderResolverForMode(setSettings, runtimeKeyStore, setReadinessOptions))
+	setGeneration.SetGenerationReadiness(setReadinessOptions)
 	w.RegisterActivity(setGeneration.PrepareProblemSetBatchActivity)
 	w.RegisterActivity(setGeneration.RecordProblemSetSlotActivity)
 	w.RegisterActivity(setGeneration.AttachProblemSetSlotActivity)

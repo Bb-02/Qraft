@@ -79,6 +79,7 @@ var routePermissions = map[string]RoutePermission{
 	"GET /api/v1/generation/jobs/:id/events":                        PermissionMember,
 	"POST /api/v1/problem-sets":                                     PermissionMember,
 	"GET /api/v1/problem-sets":                                      PermissionMember,
+	"GET /api/v1/problem-sets/generation-readiness":                 PermissionMember,
 	"POST /api/v1/problem-sets/assembly-preview":                    PermissionMember,
 	"POST /api/v1/problem-sets/assemble":                            PermissionMember,
 	"GET /api/v1/problem-sets/:id":                                  PermissionMember,

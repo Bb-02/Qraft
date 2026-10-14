@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
 	"reflect"
 	"strings"
 	"time"
@@ -518,23 +517,7 @@ func normalizedLLMEndpoint(request *llm.Request, fallbackBaseURL string) string 
 	if request != nil && request.Runtime != nil {
 		raw = strings.TrimSpace(request.Runtime.BaseURL)
 	}
-	if raw == "" {
-		raw = strings.TrimSpace(fallbackBaseURL)
-	}
-	if raw == "" {
-		return "https://api.anthropic.com/v1/messages"
-	}
-	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return raw
-	}
-	parsed.Scheme = strings.ToLower(parsed.Scheme)
-	parsed.Host = strings.ToLower(parsed.Host)
-	parsed.User = nil
-	parsed.RawQuery = ""
-	parsed.ForceQuery = false
-	parsed.Fragment = ""
-	return strings.TrimRight(parsed.String(), "/")
+	return llm.NormalizeEndpointIdentity(raw, fallbackBaseURL)
 }
 
 func canonicalPromptID(id string) string {

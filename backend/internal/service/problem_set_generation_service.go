@@ -35,7 +35,9 @@ type ProblemSetGenerationService struct {
 	temporal        client.Client
 	queue           string
 	resolve         ProblemSetProviderResolver
+	resolveForMode  ProblemSetReadinessProviderResolver
 	runtimeWarnings func(context.Context) ([]string, error)
+	readiness       *ProblemSetGenerationReadinessOptions
 }
 
 func NewProblemSetGenerationService(sets *ProblemSetService, repo problemSetGenerationStore, problems *ProblemService, tags setTagReader, temporalClient client.Client, queue string, resolve ProblemSetProviderResolver) *ProblemSetGenerationService {
@@ -45,6 +47,9 @@ func setWorkflowID(ref domain.ProblemSetGenerationRef) string {
 	return "problem-set-generation-" + ref.SetID.String() + "-" + ref.RunID
 }
 func (s *ProblemSetGenerationService) Start(ctx context.Context, id uuid.UUID) (*domain.ProblemSetGenerationState, error) {
+	if s == nil || s.sets == nil {
+		return nil, fmt.Errorf("problem-set generation is unavailable")
+	}
 	if err := s.sets.requireSetAccess(ctx, id, true); err != nil {
 		return nil, err
 	}
@@ -61,7 +66,13 @@ func (s *ProblemSetGenerationService) Start(ctx context.Context, id uuid.UUID) (
 	if err = set.GenerationConfig.Validate(set.DesiredItemCount); err != nil {
 		return nil, fmt.Errorf("validation: %w", err)
 	}
-	if _, err = s.resolve(ctx); err != nil {
+	if set.Generation.Active() && set.Generation.Status != "queued" {
+		return s.submittedSetRuntime(ctx, set.Generation), nil
+	}
+	if _, err = s.RequireGenerationReadiness(ctx, set.GenerationConfig, set.DesiredItemCount); err != nil {
+		return nil, err
+	}
+	if _, err = s.resolveSetGenerationProviders(ctx, set.GenerationConfig); err != nil {
 		return nil, err
 	}
 	next := set.Generation
