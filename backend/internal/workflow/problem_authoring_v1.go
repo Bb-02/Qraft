@@ -156,12 +156,17 @@ func validateAuthoringWorkflowResultV1(
 		}
 		original := result.SourceArtifacts[0].LLMCallReceipt
 		final := result.SourceArtifacts[1].LLMCallReceipt
-		if original.PromptID != activities.AuthoringPlanPromptIDV2 || final.PromptID != activities.AuthoringPlanFormatRepairPromptIDV2 || original.PromptVersion != "v2" || final.PromptVersion != "v2" || original.RequestSHA256 == final.RequestSHA256 {
+		v2Pair := original.PromptID == activities.AuthoringPlanPromptIDV2 && final.PromptID == activities.AuthoringPlanFormatRepairPromptIDV2 && original.PromptVersion == "v2" && final.PromptVersion == "v2"
+		v3Pair := original.PromptID == activities.AuthoringPlanPromptIDV3 && final.PromptID == activities.AuthoringPlanFormatRepairPromptIDV3 && original.PromptVersion == "v3" && final.PromptVersion == "v3"
+		if (!v2Pair && !v3Pair) || original.RequestSHA256 == final.RequestSHA256 {
 			return fmt.Errorf("authoring result format-correction source receipt identity is invalid")
 		}
 		if original.RequestedModel != final.RequestedModel || original.Provider != final.Provider || original.EndpointID != final.EndpointID {
 			return fmt.Errorf("authoring result format correction changed its provider route")
 		}
+	}
+	if result.Failure != nil && (result.GateReasonCode != activities.AuthoringPlanGateReasonSpecLintFailed || result.Failure.Code != "spec_lint_failed" || result.Failure.BlockedGate != "spec_lint" || result.Failure.Message != result.RejectionReason || len(result.Failure.BlockingIssues) == 0) {
+		return fmt.Errorf("authoring result server lint explanation violates the rejection contract")
 	}
 
 	switch result.GateReasonCode {

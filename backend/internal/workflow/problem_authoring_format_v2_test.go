@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Gingoo-TvT/Qraft/backend/internal/domain"
 	"github.com/Gingoo-TvT/Qraft/backend/internal/workflow/activities"
 	"github.com/stretchr/testify/mock"
 )
@@ -67,6 +68,34 @@ func TestAuthoringResultAllowsOneAuditableFormatCorrectionV2(t *testing.T) {
 	result.LintErrorCount = 1
 	if err := validateAuthoringWorkflowResultV1(input, result); err != nil {
 		t.Fatalf("corrected but lint-rejected result rejected: %v", err)
+	}
+}
+
+func TestAuthoringResultAcceptsV3CorrectionAndKeepsHistoricalV2(t *testing.T) {
+	_, _, input := newAuthoringWorkflowEnvironment(t)
+	v2 := correctedAuthoringWorkflowResultV2(t, input)
+	if err := validateAuthoringWorkflowResultV1(input, v2); err != nil {
+		t.Fatalf("historical v2 rejected: %v", err)
+	}
+	v3 := correctedAuthoringWorkflowResultV2(t, input)
+	v3.SourceArtifacts[0].LLMCallReceipt.PromptID = activities.AuthoringPlanPromptIDV3
+	v3.SourceArtifacts[1].LLMCallReceipt.PromptID = activities.AuthoringPlanFormatRepairPromptIDV3
+	v3.SourceArtifacts[0].LLMCallReceipt.PromptVersion, v3.SourceArtifacts[1].LLMCallReceipt.PromptVersion = "v3", "v3"
+	if err := validateAuthoringWorkflowResultV1(input, v3); err != nil {
+		t.Fatalf("v3 rejected: %v", err)
+	}
+	v3.SourceArtifacts[0].LLMCallReceipt.PromptVersion = "v2"
+	if err := validateAuthoringWorkflowResultV1(input, v3); err == nil {
+		t.Fatal("mixed prompt versions accepted")
+	}
+}
+
+func TestAuthoringResultRejectsLintExplanationOnAcceptedOutcome(t *testing.T) {
+	_, _, input := newAuthoringWorkflowEnvironment(t)
+	result := acceptedAuthoringWorkflowResult(t, input)
+	result.Failure = &domain.GenerationFailure{Code: "spec_lint_failed", Message: "合成错误", BlockedGate: "spec_lint", BlockingIssues: []string{"缺少整数范围"}}
+	if err := validateAuthoringWorkflowResultV1(input, result); err == nil {
+		t.Fatal("accepted result carried a conflicting server lint failure")
 	}
 }
 

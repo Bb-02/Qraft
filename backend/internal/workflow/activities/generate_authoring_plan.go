@@ -52,20 +52,21 @@ type GenerateAuthoringPlanInput struct {
 // GenerateAuthoringPlanResult keeps Temporal history small. The full typed
 // contract and lint report are stored in BundleArtifact.
 type GenerateAuthoringPlanResult struct {
-	PayloadVersion     int            `json:"payload_version"`
-	ModelDecision      string         `json:"model_decision"`
-	Decision           string         `json:"decision"`
-	GateReasonCode     string         `json:"gate_reason_code,omitempty"`
-	RejectionReason    string         `json:"rejection_reason,omitempty"`
-	InputSHA256        string         `json:"input_sha256"`
-	BriefSHA256        string         `json:"brief_sha256"`
-	SemanticSpecSHA256 string         `json:"semantic_spec_sha256,omitempty"`
-	BundleSHA256       string         `json:"bundle_sha256"`
-	BundleArtifact     *ArtifactRef   `json:"bundle_artifact"`
-	SourceArtifacts    []*ArtifactRef `json:"source_artifacts"`
-	LintPassed         bool           `json:"lint_passed"`
-	LintErrorCount     int            `json:"lint_error_count"`
-	LintAdvisoryCount  int            `json:"lint_advisory_count"`
+	PayloadVersion     int                       `json:"payload_version"`
+	ModelDecision      string                    `json:"model_decision"`
+	Decision           string                    `json:"decision"`
+	GateReasonCode     string                    `json:"gate_reason_code,omitempty"`
+	RejectionReason    string                    `json:"rejection_reason,omitempty"`
+	InputSHA256        string                    `json:"input_sha256"`
+	BriefSHA256        string                    `json:"brief_sha256"`
+	SemanticSpecSHA256 string                    `json:"semantic_spec_sha256,omitempty"`
+	BundleSHA256       string                    `json:"bundle_sha256"`
+	BundleArtifact     *ArtifactRef              `json:"bundle_artifact"`
+	SourceArtifacts    []*ArtifactRef            `json:"source_artifacts"`
+	LintPassed         bool                      `json:"lint_passed"`
+	LintErrorCount     int                       `json:"lint_error_count"`
+	LintAdvisoryCount  int                       `json:"lint_advisory_count"`
+	Failure            *domain.GenerationFailure `json:"failure,omitempty"`
 }
 
 // AuthoringPlanBundleV1 is the immutable CAS payload consumed by later QG-02
@@ -135,7 +136,7 @@ func (a *Activities) GenerateAuthoringPlanActivity(ctx context.Context, in Gener
 		return nil, fmt.Errorf("hash authoring-plan input: %w", err)
 	}
 
-	system, err := authoringPlanSystemPromptV2()
+	system, err := authoringPlanSystemPromptV3()
 	if err != nil {
 		return nil, fmt.Errorf("build authoring-plan output contract: %w", err)
 	}
@@ -144,8 +145,8 @@ func (a *Activities) GenerateAuthoringPlanActivity(ctx context.Context, in Gener
 	req := &llm.Request{
 		MaxTokens:     16000,
 		System:        system,
-		PromptID:      authoringPlanFormatSubstepV2,
-		PromptVersion: "v2",
+		PromptID:      AuthoringPlanPromptIDV3,
+		PromptVersion: "v3",
 		Temperature:   &temperature,
 		Messages: []llm.Message{
 			{Role: "user", Content: buildAuthoringPlanPromptV1(brief, params, in.Neighbors)},
@@ -157,7 +158,7 @@ func (a *Activities) GenerateAuthoringPlanActivity(ctx context.Context, in Gener
 	stopHB := heartbeatWhile(ctx, "calling LLM to generate SemanticSpec and AuthoringPlan", 15*time.Second)
 	// Version the logical effect key with the prompt contract. Changing the
 	// request under the old key would collide with a completed v1 response.
-	response, sourceArtifact, err := a.completeLLMWithProvenance(ctx, authoringPlanFormatSubstepV2, req, 2)
+	response, sourceArtifact, err := a.completeLLMWithProvenance(ctx, AuthoringPlanPromptIDV3, req, 2)
 	stopHB()
 	if err != nil {
 		return nil, wrapRequiredProviderEffectError("llm call for authoring-plan generation", err)
@@ -171,9 +172,9 @@ func (a *Activities) GenerateAuthoringPlanActivity(ctx context.Context, in Gener
 		// A completed but malformed response must not be replayed as a new paid
 		// attempt. A single separately cached format repair can correct its
 		// shape; the same strict parser and deterministic lint still apply.
-		repairReq := authoringPlanFormatRepairRequestV2(req, response.Text(), parseErr)
+		repairReq := authoringPlanFormatRepairRequestV3(req, response.Text(), parseErr)
 		stopHB = heartbeatWhile(ctx, "correcting authoring-plan JSON format", 15*time.Second)
-		response, sourceArtifact, err = a.completeLLMWithProvenance(ctx, authoringPlanFormatRepairSubstepV2, repairReq, 2)
+		response, sourceArtifact, err = a.completeLLMWithProvenance(ctx, AuthoringPlanFormatRepairPromptIDV3, repairReq, 2)
 		stopHB()
 		if err != nil {
 			return nil, wrapRequiredProviderEffectError("llm call for authoring-plan format repair", err)
@@ -251,12 +252,13 @@ func (a *Activities) GenerateAuthoringPlanActivity(ctx context.Context, in Gener
 			}
 		}
 		if !lintReport.Passed {
+			result.Failure = authoringLintFailureV3(lintReport)
 			bundle.Decision = AuthoringPlanDecisionRejected
 			bundle.GateReasonCode = AuthoringPlanGateReasonSpecLintFailed
-			bundle.RejectionReason = "deterministic spec lint failed"
+			bundle.RejectionReason = result.Failure.Message
 			result.Decision = AuthoringPlanDecisionRejected
 			result.GateReasonCode = AuthoringPlanGateReasonSpecLintFailed
-			result.RejectionReason = "deterministic spec lint failed"
+			result.RejectionReason = result.Failure.Message
 		}
 	}
 

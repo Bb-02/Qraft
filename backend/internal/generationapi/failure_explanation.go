@@ -14,12 +14,32 @@ func EnrichFailure(failure *domain.GenerationFailure) *domain.GenerationFailure 
 	}
 	copy := *failure
 	if copy.Code == "generation_failed" || copy.Code == "model_output_invalid" || copy.Code == "model_output_truncated" {
+		if unsupported := unsupportedInputFailure(copy.TechnicalDetails); unsupported != nil {
+			unsupported.TechnicalDetails = boundedFailureText(copy.TechnicalDetails, 6000)
+			return unsupported
+		}
 		if explained := modelOutputFailure(copy.TechnicalDetails); explained != nil {
 			explained.TechnicalDetails = boundedFailureText(copy.TechnicalDetails, 6000)
 			return explained
 		}
 	}
 	return &copy
+}
+
+func unsupportedInputFailure(diagnostic string) *domain.GenerationFailure {
+	text := strings.ToLower(diagnostic)
+	if !strings.Contains(text, "unsupported parser type") && !strings.Contains(text, "unsupported input grammar profile") && !strings.Contains(text, "token string requires non-empty ascii") && !strings.Contains(text, "unsupported whitespace u+") {
+		return nil
+	}
+	retryable := false
+	reason := "当前样例与测试数据流程还不支持这道题使用的输入表示，无法完整校验数据。"
+	if strings.Contains(text, "token string requires non-empty ascii") {
+		reason = "当前字符串输入格式只支持非空、无空白的 ASCII 文本，尚不支持空字符串、含空格整行文本或 Unicode 文本。"
+	} else if strings.Contains(text, "unsupported whitespace u+") {
+		reason = "输入含有当前格式不支持的空白字符，无法按约定读取。"
+	}
+	return &domain.GenerationFailure{Code: "unsupported_input_format", Category: "流程能力限制", Stage: "样例与测试数据检查", Message: "当前流程无法校验这道题的输入格式", Reason: reason,
+		Suggestion: "核对输入表示是否在当前流程的支持范围内；需要原格式时，应先补齐对应解析与数据验证能力。这项错误不表示目标难度太低或题目质量差。", Retryable: &retryable}
 }
 
 func modelOutputFailure(diagnostic string) *domain.GenerationFailure {

@@ -41,11 +41,22 @@ func TestHistoricalFailureEnrichmentDoesNotRewritePersistedRecord(t *testing.T) 
 }
 
 func TestHTTPDigitsInWorkflowAndJSONPathsAreNotAuthenticationEvidence(t *testing.T) {
-	for _, diagnostic := range []string{"synthetic workflow-401-failed", "unrecognized field $.items[403]", "problem rating 429 failed"} {
+	for _, diagnostic := range []string{"synthetic workflow-401-failed", "unrecognized field $.items[403]", "problem rating 429 failed", "input violated forbidden boundary zero"} {
 		got := DescribeFailure(errors.New(diagnostic))
 		require.Equal(t, "generation_failed", got.Code)
 	}
 	got := DescribeFailure(errors.New("provider response status code: 403"))
 	require.Equal(t, "model_authentication", got.Code)
 	require.False(t, strings.Contains(got.Suggestion, "难度"))
+}
+
+func TestUnsupportedInputFormatHasCapabilityExplanation(t *testing.T) {
+	for _, diagnostic := range []string{`input symbol "s" has unsupported parser type "graph"`, `unsupported input grammar profile "line-text-v1"`, "token string requires non-empty ASCII without whitespace", "sample input contains unsupported whitespace U+00A0"} {
+		got := DescribeFailure(errors.New(diagnostic))
+		require.Equal(t, "unsupported_input_format", got.Code)
+		require.Equal(t, "流程能力限制", got.Category)
+		require.Equal(t, "样例与测试数据检查", got.Stage)
+		require.Equal(t, diagnostic, got.TechnicalDetails)
+		require.NotContains(t, got.Suggestion, "人工确认")
+	}
 }

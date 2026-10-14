@@ -22,6 +22,10 @@ func DescribeFailure(err error) *domain.GenerationFailure {
 		}
 	}
 	failure := &domain.GenerationFailure{Code: "generation_failed", Message: "这道题未能完成生成", Suggestion: "查看生成任务了解失败阶段，修正需求或服务配置后重试。", TechnicalDetails: boundedFailureText(err.Error(), 6000)}
+	if unsupported := unsupportedInputFailure(err.Error()); unsupported != nil {
+		unsupported.TechnicalDetails = failure.TechnicalDetails
+		return unsupported
+	}
 	if formatted := modelOutputFailure(err.Error()); formatted != nil {
 		formatted.TechnicalDetails = failure.TechnicalDetails
 		return formatted
@@ -32,7 +36,7 @@ func DescribeFailure(err error) *domain.GenerationFailure {
 	}
 	text := strings.ToLower(message)
 	switch {
-	case failureHTTPStatus(text, "401|403") || strings.Contains(text, "unauthorized") || strings.Contains(text, "forbidden") || strings.Contains(text, "authentication") || strings.Contains(text, "invalid_api_key") || strings.Contains(text, "invalid api key") || strings.Contains(text, "invalid token"):
+	case failureHTTPStatus(text, "401|403") || strings.Contains(text, "unauthorized") || strings.Contains(text, "authentication") || strings.Contains(text, "invalid_api_key") || strings.Contains(text, "invalid api key") || strings.Contains(text, "invalid token"):
 		failure.Code, failure.Message, failure.Suggestion = "model_authentication", "模型服务未通过身份验证", "检查模型配置中的 API 密钥、服务地址和模型访问权限。"
 	case failureHTTPStatus(text, "429") || strings.Contains(text, "quota") || strings.Contains(text, "rate limit"):
 		failure.Code, failure.Message, failure.Suggestion = "model_rate_limit", "模型服务限流或额度不足", "检查模型额度，稍后重试；已完成题目会保留。"

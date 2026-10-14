@@ -121,7 +121,7 @@ func TestAuthoringPlanV2RepairsOneFormatResponseAndPreservesBothSources(t *testi
 				t.Fatalf("format repair lost checks/sources: result=%+v calls=%d records=%d", result, len(model.requests), len(provenance.records))
 			}
 			first, corrected := result.SourceArtifacts[0], result.SourceArtifacts[1]
-			if first.LLMCallReceipt.PromptID != authoringPlanFormatSubstepV2 || corrected.LLMCallReceipt.PromptID != authoringPlanFormatRepairSubstepV2 || first.LLMCallReceipt.PromptVersion != "v2" || first.LLMCallReceipt.RequestSHA256 == corrected.LLMCallReceipt.RequestSHA256 {
+			if first.LLMCallReceipt.PromptID != AuthoringPlanPromptIDV3 || corrected.LLMCallReceipt.PromptID != AuthoringPlanFormatRepairPromptIDV3 || first.LLMCallReceipt.PromptVersion != "v3" || first.LLMCallReceipt.RequestSHA256 == corrected.LLMCallReceipt.RequestSHA256 {
 				t.Fatalf("repair does not have independent immutable request identity: first=%+v corrected=%+v", first, corrected)
 			}
 			if first.Producer != corrected.Producer || first.Producer != result.BundleArtifact.Producer || !strings.Contains(first.Producer, "GenerateAuthoringPlanActivity") {
@@ -234,7 +234,7 @@ func TestAuthoringPlanV2RepairEffectsAreIndependentAndReplayWithoutPaidCalls(t *
 	cache := &authoringFormatEffectStore{requests: map[string]string{}, results: map[string]json.RawMessage{}}
 	acts.deps.ProviderEffects = cache
 	acts.deps.ProviderEffectLease = time.Minute
-	var legacyKey string
+	var legacyKey, legacyV2Key string
 	run := func() *GenerateAuthoringPlanResult {
 		var suite testsuite.WorkflowTestSuite
 		env := suite.NewTestActivityEnvironment()
@@ -248,6 +248,12 @@ func TestAuthoringPlanV2RepairEffectsAreIndependentAndReplayWithoutPaidCalls(t *
 			// changed request under this exact old key would fail acquisition.
 			cache.requests[legacyKey] = "old-contract-request-hash"
 			cache.results[legacyKey] = json.RawMessage(`{"content":[{"type":"text","text":"old malformed response"}]}`)
+			legacyV2Key, err = temporalProviderEffectKey(ctx, "llm:"+AuthoringPlanPromptIDV2)
+			if err != nil {
+				return nil, err
+			}
+			cache.requests[legacyV2Key] = "old-v2-contract-request-hash"
+			cache.results[legacyV2Key] = cache.results[legacyKey]
 			return acts.GenerateAuthoringPlanActivity(ctx, input)
 		}
 		env.RegisterActivityWithOptions(wrapper, activity.RegisterOptions{Name: "GenerateAuthoringPlanActivity"})
@@ -263,7 +269,7 @@ func TestAuthoringPlanV2RepairEffectsAreIndependentAndReplayWithoutPaidCalls(t *
 	}
 	first := run()
 	second := run()
-	if len(model.requests) != 2 || len(cache.acquired) != 4 || cache.acquired[0] == cache.acquired[1] || cache.acquired[0] == legacyKey || cache.acquired[1] == legacyKey || cache.acquired[0] != cache.acquired[2] || cache.acquired[1] != cache.acquired[3] || cache.requests[cache.acquired[0]] == cache.requests[cache.acquired[1]] || first.BundleSHA256 != second.BundleSHA256 {
+	if len(model.requests) != 2 || len(cache.acquired) != 4 || cache.acquired[0] == cache.acquired[1] || cache.acquired[0] == legacyKey || cache.acquired[1] == legacyKey || cache.acquired[0] == legacyV2Key || cache.acquired[1] == legacyV2Key || cache.acquired[0] != cache.acquired[2] || cache.acquired[1] != cache.acquired[3] || cache.requests[cache.acquired[0]] == cache.requests[cache.acquired[1]] || first.BundleSHA256 != second.BundleSHA256 {
 		t.Fatalf("repair replay or effect identity broken: calls=%d keys=%v legacy=%s first=%s second=%s", len(model.requests), cache.acquired, legacyKey, first.BundleSHA256, second.BundleSHA256)
 	}
 }

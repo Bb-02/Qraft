@@ -368,8 +368,15 @@ func runProblemQualityRevisionV1(ctx, activityCtx workflow.Context, root Problem
 	candidate.AuthoringBundleArtifact = authoring.BundleArtifact
 	if authoring.Decision != activities.AuthoringPlanDecisionAccepted {
 		out := quarantine(qualitygate.GateSpecLint, authoring.BundleSHA256, false, false)
-		out.result.Failure = problemQualityFailureV1(out.result)
-		out.result.Failure.TechnicalDetails = authoring.RejectionReason
+		if authoring.Failure != nil {
+			copy := *authoring.Failure
+			copy.BlockingIssues = append([]string(nil), authoring.Failure.BlockingIssues...)
+			out.result.Failure = &copy
+		} else {
+			// Historical activity results have no structured lint explanation.
+			out.result.Failure = problemQualityFailureV1(out.result)
+			out.result.Failure.TechnicalDetails = authoring.RejectionReason
+		}
 		return out, nil
 	}
 	bundleRef := *authoring.BundleArtifact
