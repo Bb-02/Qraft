@@ -22,13 +22,17 @@ function load(relative, dependencies = {}) {
 const failures = load('./generation-failure.ts');
 const generation = load('./problem-set-generation.ts');
 const difficulty = load('./generation-difficulty.ts');
+const progress = load('./generation-progress.ts', { '@/lib/generation-failure': failures });
+const ProgressNotice = load('../components/problem-sets/GenerationProgressNotice.tsx', { '@/lib/generation-progress': progress }).default;
 const DifficultyNotice = load('../components/problem-sets/GenerationDifficultyNotice.tsx', { '@/lib/generation-difficulty': difficulty }).default;
 const Notice = load('../components/workflow/GenerationFailureNotice.tsx', { '@/lib/generation-failure': failures }).default;
 const Slot = load('../components/problem-sets/GenerationSlotCard.tsx', {
   'next/link': ({ children, ...props }) => React.createElement('a', props, children),
   '@/components/workflow/GenerationFailureNotice': { __esModule: true, default: Notice },
   '@/components/problem-sets/GenerationDifficultyNotice': { __esModule: true, default: DifficultyNotice },
+  '@/components/problem-sets/GenerationProgressNotice': { __esModule: true, default: ProgressNotice },
   '@/lib/problem-set-generation': generation,
+  '@/lib/generation-progress': progress,
 }).default;
 
 test('legacy nested Temporal errors have a readable cause and keep their diagnostics', () => {
@@ -119,6 +123,15 @@ test('a retained candidate requiring regeneration stays viewable and cannot be m
   assert.match(html, /旧候选仍保留/);
   assert.doesNotMatch(html, /人工审核并恢复原题位/);
   assert.match(renderSlot({ ...slot, regenerate: false }), /人工审核并恢复原题位/);
+});
+
+test('a disconnected running slot shows its last confirmed stage without claiming it is still running', () => {
+  const html = renderToStaticMarkup(React.createElement(Slot, { slot: { ...slot, status: 'running', execution: { state: 'running', stage: '生成参考程序', message: '正在执行', elapsed_seconds: 20, attempt: 2 } }, isAdmin: true, busy: true, connectionUnknown: true, onReview() {} }));
+  assert.match(html, /暂时无法确认执行状态/);
+  assert.match(html, /上次确认步骤：生成参考程序/);
+  assert.match(html, /1 次（第 2 次尝试）/);
+  assert.doesNotMatch(html, />正在执行</);
+  assert.doesNotMatch(html, /生成与校验中/);
 });
 
 test('quality activity names are readable in older task event streams', () => {

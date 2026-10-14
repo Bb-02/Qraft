@@ -6,6 +6,8 @@ import Link from 'next/link';
 import GenerationConfigFields from '@/components/problem-sets/GenerationConfigFields';
 import GenerationSlotCard from '@/components/problem-sets/GenerationSlotCard';
 import GenerationFailureNotice from '@/components/workflow/GenerationFailureNotice';
+import GenerationProgressNotice from '@/components/problem-sets/GenerationProgressNotice';
+import { consumeGenerationStartNotice, generationProgressTitle, generationStartNotice, type GenerationStartNotice } from '@/lib/generation-progress';
 import { defaultSetGenerationConfig, generationConfigForSet, isSetGenerationActive, SET_QUESTION_TYPES, setGenerationStatusLabel, setGenerationTotal, validateSetGenerationConfig } from '@/lib/problem-set-generation';
 import { ViewTabs, ViewPanel } from '@/components/ui/ViewTabs';
 import { useParams } from 'next/navigation';
@@ -89,6 +91,7 @@ export default function ProblemSetDetailPage() {
   const [editGenerationConfig, setEditGenerationConfig] = useState(defaultSetGenerationConfig);
   const [stopRequested, setStopRequested] = useState(false);
   const [progressError, setProgressError] = useState('');
+  const [startFailureNotice, setStartFailureNotice] = useState<GenerationStartNotice | null>(null);
   const [reviewCandidate, setReviewCandidate] = useState<{ slot: ProblemSetGenerationSlot; problem: Problem } | null>(null);
   const [reviewNote, setReviewNote] = useState('');
   const [reviewConfirmed, setReviewConfirmed] = useState(false);
@@ -112,7 +115,9 @@ export default function ProblemSetDetailPage() {
       const response = await getProblemSet(id);
       setSet(response.data ?? null);
       if (new URLSearchParams(window.location.search).has('generation_start_failed')) {
-        setError('题集已保存，但自动启动失败。请检查模型配置后点击开始生成。');
+        let notice = generationStartNotice('');
+        try { notice = consumeGenerationStartNotice(window.sessionStorage, id); } catch { /* Display the generic saved-set notice when browser storage is unavailable. */ }
+        setStartFailureNotice(notice);
         window.history.replaceState(null, '', window.location.pathname);
       }
     } catch (cause) {
@@ -186,7 +191,7 @@ export default function ProblemSetDetailPage() {
         }
         if (!cancelled) setProgressError('');
       } catch {
-        if (!cancelled) setProgressError('进度暂时无法同步，后台任务会继续。正在自动重连。');
+        if (!cancelled) setProgressError('暂时无法同步执行状态，正在重新连接。尚不能确认任务是否正在运行，请保留这个题集。');
       } finally { inFlight = false; }
     }
     void refreshProgress();
@@ -342,6 +347,9 @@ export default function ProblemSetDetailPage() {
   if (!set) return <div className="forge-page"><div className="rounded-lg bg-danger-50 p-4 text-danger-600">{error || '题集不存在'}</div></div>;
 
   const quality = set.quality;
+  const executionProgress = progressError
+    ? { ...set.generation?.runtime, state: 'unknown' as const, message: progressError, elapsed_seconds: set.generation?.runtime?.elapsed_seconds ?? 0 }
+    : set.generation?.runtime || (set.generation?.status === 'queued' ? { state: 'queued' as const, message: '生成任务已提交，等待执行服务开始。', elapsed_seconds: Math.max(0, Math.floor((Date.now() - Date.parse(set.generation.started_at)) / 1000)) } : undefined);
   return (
     <div className="af-page af-set-content">
       <Link href="/problem-sets" className="inline-flex items-center gap-2 text-sm text-anvil-500 hover:text-forge-600"><ArrowLeft className="h-4 w-4" /> 返回题集</Link>
@@ -384,6 +392,7 @@ export default function ProblemSetDetailPage() {
 </details>
 {!canManage && <p className="rounded-lg border border-[var(--dl)] p-3 text-sm text-[var(--dm)]">这是团队共享题集。你可以查看与导出；修改由管理员统一管理。</p>}
 {error && <div role="alert" className="rounded-lg border border-danger-400/30 bg-danger-50 p-4 text-sm text-danger-600"><GenerationFailureNotice error={error} /></div>}
+{startFailureNotice && (!set.generation || set.generation.status === 'queued') && <div role="status" className="rounded-lg border border-warning-400/30 bg-warning-50 p-4 text-sm text-warning-700"><p className="font-medium">{startFailureNotice.message}</p><p className="mt-1">{startFailureNotice.suggestion}</p></div>}
       <ViewTabs id="set-content" value={detailTab} onChange={setDetailTab} items={[
         { id: 'items', label: '题目目录（' + items.length + '）' }, ...(canManage ? [{ id: 'generation', label: '生成进度' }] : []),
         { id: 'settings', label: '题集需求' }, { id: 'quality', label: '质量与去重' },
@@ -454,7 +463,7 @@ export default function ProblemSetDetailPage() {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h2 className="forge-section-title">{set.generation_config?.assembly ? '补齐缺少的题目（可选）' : '自动生成整套题目'}</h2>
-            <p className="mt-1 text-sm text-anvil-500">{set.generation ? setGenerationStatusLabel(set.generation.status) : set.generation_config?.assembly ? '本题集从已有题库组卷。缺题时可手工加入，或在确认需求后生成补齐。' : '填写下方需求并开始，系统会自动规划、生成、校验和入集。'}</p>
+            <p className="mt-1 text-sm text-anvil-500">{set.generation ? executionProgress ? generationProgressTitle(executionProgress) : setGenerationStatusLabel(set.generation.status) : set.generation_config?.assembly ? '本题集从已有题库组卷。缺题时可手工加入，或在确认需求后生成补齐。' : '填写下方需求并开始，系统会自动规划、生成、校验和入集。'}</p>
           </div>
           {generationActive ? <div className="flex gap-2">
             {set.generation?.status === 'queued' && <button className="forge-btn-secondary" disabled={!canManage || working} onClick={() => void resumeQueuedGeneration()}>重新提交启动</button>}
@@ -465,7 +474,7 @@ export default function ProblemSetDetailPage() {
           </button>}
         </div>
         <p className="text-xs text-anvil-500">成功题目逐题保存。待审候选可先查看和修复；管理员人工审核后可恢复原题位。停止或失败后，重试只补齐未完成的题目。已有题目会计入题型配额，修改需求不会重写已入集的题目。</p>
-        {progressError && <p className="text-sm text-warning-600">{progressError}</p>}
+        <GenerationProgressNotice progress={executionProgress} />
         {set.generation?.error && <div className="text-danger-600"><GenerationFailureNotice error={set.generation.error} /></div>}
         {set.generation && <>
           <div className="flex items-center gap-3 text-sm">
@@ -473,7 +482,7 @@ export default function ProblemSetDetailPage() {
             <span>{set.generation.slots.filter((slot) => slot.status === 'succeeded').length} / {set.generation.slots.length} 已完成</span>
           </div>
           <div className="max-h-[32rem] space-y-2 overflow-auto">
-            {set.generation.slots.map(slot => <GenerationSlotCard key={slot.position} slot={slot} isAdmin={isAdmin} busy={working || generationActive || savingConfig} onReview={candidate => void openCandidateReview(candidate)} />)}
+            {set.generation.slots.map(slot => <GenerationSlotCard key={slot.position} slot={slot} isAdmin={isAdmin} busy={working || generationActive || savingConfig} connectionUnknown={Boolean(progressError)} onReview={candidate => void openCandidateReview(candidate)} />)}
           </div>
         </>}
       </section><section className="forge-card">

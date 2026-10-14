@@ -1083,6 +1083,7 @@ export interface ProblemSetGenerationSlot {
   quiz_id?: string;
   error?: string;
   failure?: import('./generation-failure').GenerationFailure;
+  execution?: import('./generation-progress').GenerationExecutionProgress;
 }
 
 export interface ProblemSetGenerationState {
@@ -1090,6 +1091,7 @@ export interface ProblemSetGenerationState {
   status: string;
   slots: ProblemSetGenerationSlot[];
   error?: string;
+  runtime?: import('./generation-progress').GenerationExecutionProgress;
   started_at: string;
   updated_at: string;
 }

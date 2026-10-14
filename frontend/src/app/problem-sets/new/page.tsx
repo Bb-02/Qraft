@@ -11,6 +11,7 @@ import GenerationFailureNotice from '@/components/workflow/GenerationFailureNoti
 import { defaultSetGenerationConfig, SET_QUESTION_TYPES, setGenerationTotal, validateSetGenerationConfig } from '@/lib/problem-set-generation';
 import { createProblemSet } from '@/lib/api';
 import type { ProblemSetCreateRequest, ProblemSetKind } from '@/lib/types';
+import { saveGenerationStartNotice } from '@/lib/generation-progress';
 
 const DEFAULT_STYLE = '题面清晰、叙事克制，按整套需求安排题目风格、知识覆盖和顺序。';
 const DEFAULT_DIFFICULTY = '按整套需求和适用选手水平安排难度与梯度，优先满足明确指定的难度范围。';
@@ -79,6 +80,9 @@ export default function NewProblemSetPage() {
     try {
       const response = await createProblemSet(payload);
       if (!response.data) throw new Error('服务没有返回新题集。');
+      if (response.data.generation_error) {
+        try { saveGenerationStartNotice(window.sessionStorage, response.data.id, response.data.generation_error); } catch { /* The saved set and redirect remain available without browser storage. */ }
+      }
       router.push(`/problem-sets/${response.data.id}${response.data.generation_error ? '?generation_start_failed=1' : ''}`);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '创建题集失败');
