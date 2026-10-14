@@ -285,16 +285,18 @@ func (s *ProblemSetService) Get(ctx context.Context, id uuid.UUID) (*domain.Prob
 		}
 		return nil, err
 	}
-	if err := s.hydrateItems(ctx, set); err != nil {
+	response := *set
+	if err := s.hydrateItems(ctx, &response); err != nil {
 		return nil, err
 	}
-	quality, err := s.quality(ctx, set, false)
+	quality, err := s.quality(ctx, &response, false)
 	if err != nil {
 		return nil, err
 	}
-	set.Quality = quality
-	s.redactSetTask(ctx, set)
-	return set, nil
+	response.Quality = quality
+	s.redactSetTask(ctx, &response)
+	response.Generation = explainSetGenerationFailures(response.Generation)
+	return &response, nil
 }
 
 func (s *ProblemSetService) List(ctx context.Context, filter repository.ProblemSetListFilter) ([]*domain.ProblemSet, int, error) {
