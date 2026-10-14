@@ -136,7 +136,7 @@ func (a *Activities) GenerateAuthoringPlanActivity(ctx context.Context, in Gener
 		return nil, fmt.Errorf("hash authoring-plan input: %w", err)
 	}
 
-	system, err := authoringPlanSystemPromptV3()
+	system, err := authoringPlanSystemPromptV4()
 	if err != nil {
 		return nil, fmt.Errorf("build authoring-plan output contract: %w", err)
 	}
@@ -145,8 +145,8 @@ func (a *Activities) GenerateAuthoringPlanActivity(ctx context.Context, in Gener
 	req := &llm.Request{
 		MaxTokens:     16000,
 		System:        system,
-		PromptID:      AuthoringPlanPromptIDV3,
-		PromptVersion: "v3",
+		PromptID:      AuthoringPlanPromptIDV4,
+		PromptVersion: "v4",
 		Temperature:   &temperature,
 		Messages: []llm.Message{
 			{Role: "user", Content: buildAuthoringPlanPromptV1(brief, params, in.Neighbors)},
@@ -158,7 +158,7 @@ func (a *Activities) GenerateAuthoringPlanActivity(ctx context.Context, in Gener
 	stopHB := heartbeatWhile(ctx, "calling LLM to generate SemanticSpec and AuthoringPlan", 15*time.Second)
 	// Version the logical effect key with the prompt contract. Changing the
 	// request under the old key would collide with a completed v1 response.
-	response, sourceArtifact, err := a.completeLLMWithProvenance(ctx, AuthoringPlanPromptIDV3, req, 2)
+	response, sourceArtifact, err := a.completeLLMWithProvenance(ctx, AuthoringPlanPromptIDV4, req, 2)
 	stopHB()
 	if err != nil {
 		return nil, wrapRequiredProviderEffectError("llm call for authoring-plan generation", err)
@@ -172,9 +172,9 @@ func (a *Activities) GenerateAuthoringPlanActivity(ctx context.Context, in Gener
 		// A completed but malformed response must not be replayed as a new paid
 		// attempt. A single separately cached format repair can correct its
 		// shape; the same strict parser and deterministic lint still apply.
-		repairReq := authoringPlanFormatRepairRequestV3(req, response.Text(), parseErr)
+		repairReq := authoringPlanFormatRepairRequestV4(req, response.Text(), parseErr)
 		stopHB = heartbeatWhile(ctx, "correcting authoring-plan JSON format", 15*time.Second)
-		response, sourceArtifact, err = a.completeLLMWithProvenance(ctx, AuthoringPlanFormatRepairPromptIDV3, repairReq, 2)
+		response, sourceArtifact, err = a.completeLLMWithProvenance(ctx, AuthoringPlanFormatRepairPromptIDV4, repairReq, 2)
 		stopHB()
 		if err != nil {
 			return nil, wrapRequiredProviderEffectError("llm call for authoring-plan format repair", err)
@@ -548,6 +548,7 @@ func buildAuthoringPlanPromptV1(brief string, params domain.ProblemGenParams, ne
 		Locale: params.Locale, CustomPrompt: params.CustomPrompt,
 	})
 	encodedNeighbors, _ := json.Marshal(neighborFacts)
+	encodedCapabilities, _ := json.Marshal(currentAuthoringInputCapabilitiesV4())
 	countPolicy := "fixed exact count"
 	countInstructions := "The later test-data stage must produce exactly the requested count."
 	if adaptiveTestCases {
@@ -555,6 +556,7 @@ func buildAuthoringPlanPromptV1(brief string, params domain.ProblemGenParams, ne
 		countInstructions = fmt.Sprintf("The later test-data stage must choose the smallest sufficient suite in [%d,%d] (custom cases included), without padding duplicates. Derive test intents from distinct applicable boundary, adversarial, and scale regions; include a genuinely small exhaustive/brute-check intent and a maximum-scale randomized/pressure intent when the constraints make them meaningful.", minTestCases, maxTestCases)
 	}
 	return "Canonical brief (do not change its core mechanism):\n" + brief +
+		"\n\nCurrent server input capabilities (authoritative; supersede historical capability metadata in the brief, never its frozen task facts):\n" + string(encodedCapabilities) +
 		"\n\nGeneration parameters:\n" + string(encodedParams) +
 		"\n\nTest-data count policy: " + countPolicy + ". " + countInstructions +
 		"\n\nNearby problems to avoid imitating:\n" + string(encodedNeighbors) +

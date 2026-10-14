@@ -158,7 +158,8 @@ func validateAuthoringWorkflowResultV1(
 		final := result.SourceArtifacts[1].LLMCallReceipt
 		v2Pair := original.PromptID == activities.AuthoringPlanPromptIDV2 && final.PromptID == activities.AuthoringPlanFormatRepairPromptIDV2 && original.PromptVersion == "v2" && final.PromptVersion == "v2"
 		v3Pair := original.PromptID == activities.AuthoringPlanPromptIDV3 && final.PromptID == activities.AuthoringPlanFormatRepairPromptIDV3 && original.PromptVersion == "v3" && final.PromptVersion == "v3"
-		if (!v2Pair && !v3Pair) || original.RequestSHA256 == final.RequestSHA256 {
+		v4Pair := original.PromptID == activities.AuthoringPlanPromptIDV4 && final.PromptID == activities.AuthoringPlanFormatRepairPromptIDV4 && original.PromptVersion == "v4" && final.PromptVersion == "v4"
+		if (!v2Pair && !v3Pair && !v4Pair) || original.RequestSHA256 == final.RequestSHA256 {
 			return fmt.Errorf("authoring result format-correction source receipt identity is invalid")
 		}
 		if original.RequestedModel != final.RequestedModel || original.Provider != final.Provider || original.EndpointID != final.EndpointID {

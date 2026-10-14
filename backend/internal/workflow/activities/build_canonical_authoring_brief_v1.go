@@ -36,6 +36,7 @@ type CanonicalAuthoringBriefV1 struct {
 	RequiredFacts             []CanonicalAuthoringBriefFactV1 `json:"required_facts"`
 	InputGrammarProfile       string                          `json:"input_grammar_profile"`
 	SupportedInputSymbolTypes []string                        `json:"supported_input_symbol_types"`
+	StringInputPolicy         string                          `json:"string_input_policy,omitempty"`
 }
 
 type BuildCanonicalAuthoringBriefResult struct {
@@ -62,12 +63,14 @@ func (a *Activities) BuildCanonicalAuthoringBriefActivityV1(
 	}
 	canonicalFacts := make([]CanonicalAuthoringBriefFactV1, len(normalized.RequiredFacts))
 	copy(canonicalFacts, normalized.RequiredFacts)
+	capabilities := currentAuthoringInputCapabilitiesV4()
 	brief := CanonicalAuthoringBriefV1{
 		SchemaVersion:             CanonicalAuthoringBriefSchemaV1,
 		FrozenConcept:             normalized.FrozenConcept,
 		RequiredFacts:             canonicalFacts,
 		InputGrammarProfile:       domain.SemanticGrammarTokenLinesV1,
-		SupportedInputSymbolTypes: []string{domain.SemanticSymbolInteger, domain.SemanticSymbolIntegerSequence},
+		SupportedInputSymbolTypes: capabilities.SupportedInputSymbolTypes,
+		StringInputPolicy:         capabilities.StringInputPolicy,
 	}
 	briefBytes, err := json.Marshal(brief)
 	if err != nil {

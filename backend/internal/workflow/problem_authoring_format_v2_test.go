@@ -90,6 +90,21 @@ func TestAuthoringResultAcceptsV3CorrectionAndKeepsHistoricalV2(t *testing.T) {
 	}
 }
 
+func TestAuthoringResultAcceptsV4CapabilitiesCorrectionWithoutRelabelingV3(t *testing.T) {
+	_, _, input := newAuthoringWorkflowEnvironment(t)
+	v4 := correctedAuthoringWorkflowResultV2(t, input)
+	v4.SourceArtifacts[0].LLMCallReceipt.PromptID = activities.AuthoringPlanPromptIDV4
+	v4.SourceArtifacts[1].LLMCallReceipt.PromptID = activities.AuthoringPlanFormatRepairPromptIDV4
+	v4.SourceArtifacts[0].LLMCallReceipt.PromptVersion, v4.SourceArtifacts[1].LLMCallReceipt.PromptVersion = "v4", "v4"
+	if err := validateAuthoringWorkflowResultV1(input, v4); err != nil {
+		t.Fatalf("v4 rejected: %v", err)
+	}
+	v4.SourceArtifacts[1].LLMCallReceipt.PromptID = activities.AuthoringPlanFormatRepairPromptIDV3
+	if err := validateAuthoringWorkflowResultV1(input, v4); err == nil {
+		t.Fatal("mixed v4/v3 correction identities accepted")
+	}
+}
+
 func TestAuthoringResultRejectsLintExplanationOnAcceptedOutcome(t *testing.T) {
 	_, _, input := newAuthoringWorkflowEnvironment(t)
 	result := acceptedAuthoringWorkflowResult(t, input)

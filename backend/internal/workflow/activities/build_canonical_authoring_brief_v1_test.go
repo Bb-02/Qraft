@@ -38,7 +38,7 @@ func TestBuildCanonicalAuthoringBriefV1NormalizesOrderAndLineEndingsDeterministi
 		t.Fatal(err)
 	}
 	if brief.SchemaVersion != CanonicalAuthoringBriefSchemaV1 || brief.InputGrammarProfile == "" ||
-		len(brief.SupportedInputSymbolTypes) != 2 || brief.RequiredFacts[0].Key != "alpha" {
+		len(brief.SupportedInputSymbolTypes) != 4 || brief.StringInputPolicy == "" || brief.RequiredFacts[0].Key != "alpha" {
 		t.Fatalf("unexpected canonical brief: %+v", brief)
 	}
 }
