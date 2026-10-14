@@ -143,6 +143,25 @@ test('quality activity names are readable in older task event streams', () => {
   assert.equal(failures.generationStepLabel('future_unknown_step'), 'future_unknown_step');
 });
 
+test('a confirmed stopped set never presents unfinished slots as still generating', () => {
+  const render = (status, runStatus) => renderToStaticMarkup(React.createElement(Slot, {
+    slot: { ...slot, status, execution: { state: 'running', stage: '生成参考程序', message: '正在执行' } },
+    runStatus, isAdmin: true, busy: false, onReview() {},
+  }));
+  for (const status of ['running', 'pending', 'generated']) {
+    const stopped = render(status, 'cancelled');
+    assert.match(stopped, /本次已停止，尚未完成/);
+    assert.doesNotMatch(stopped, /生成与校验中|正在执行|正在入集|当前步骤/);
+    assert.match(stopped, /href="\/workflows\/synthetic-job"/);
+    assert.match(render(status, 'failed'), /本次执行已结束，尚未完成/);
+  }
+  assert.match(render('running', 'generating'), /正在执行/);
+  assert.doesNotMatch(render('running', 'future-unknown'), /本次执行已结束/);
+  assert.match(render('succeeded', 'cancelled'), /已完成/);
+  assert.match(render('failed', 'cancelled'), /生成失败/);
+  assert.match(render('awaiting_review', 'cancelled'), /等待人工审核/);
+});
+
 test('legacy authoring JSON errors identify format and stage before incidental rating or status numbers', () => {
   const cases = [
     ['json: cannot unmarshal number into Go struct field brief of type string; rating 401', /字段类型/],

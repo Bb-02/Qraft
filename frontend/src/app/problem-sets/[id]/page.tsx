@@ -508,7 +508,7 @@ export default function ProblemSetDetailPage() {
             <span>{set.generation.slots.filter((slot) => slot.status === 'succeeded').length} / {set.generation.slots.length} 已完成</span>
           </div>
           <div className="max-h-[32rem] space-y-2 overflow-auto">
-            {set.generation.slots.map(slot => <GenerationSlotCard key={slot.position} slot={slot} isAdmin={isAdmin} busy={working || generationActive || savingConfig} connectionUnknown={Boolean(progressError)} onReview={candidate => void openCandidateReview(candidate)} />)}
+            {set.generation.slots.map(slot => <GenerationSlotCard key={slot.position} slot={slot} isAdmin={isAdmin} busy={working || generationActive || savingConfig} connectionUnknown={Boolean(progressError)} runStatus={set.generation?.status} onReview={candidate => void openCandidateReview(candidate)} />)}
           </div>
         </>}
       </section><section className="forge-card">
