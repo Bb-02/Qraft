@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -1427,6 +1428,7 @@ type S3StrictReviewerResultV1 struct {
 	Reviewer           qualitygate.ReviewerEvidenceV1 `json:"reviewer"`
 	AssessmentArtifact *ArtifactRef                   `json:"assessment_artifact"`
 	ProviderArtifact   *ArtifactRef                   `json:"provider_artifact"`
+	SourceArtifacts    []*ArtifactRef                 `json:"source_artifacts,omitempty"`
 }
 
 func (a *Activities) S3StrictReviewerActivityV1(ctx context.Context, in S3StrictReviewerInputV1) (*S3StrictReviewerResultV1, error) {
@@ -1493,7 +1495,11 @@ func (a *Activities) S3StrictReviewerActivityV1(ctx context.Context, in S3Strict
 		return nil, fmt.Errorf("marshal strict reviewer prompt: %w", err)
 	}
 	temperature := 0.0
-	req := &llm.Request{MaxTokens: 8192, System: s3StrictReviewerSystemPromptV1, Temperature: &temperature, Messages: []llm.Message{{Role: "user", Content: string(prompt)}}}
+	system, err := s3ReviewerOutputPromptV2(in.TargetDifficulty > 0)
+	if err != nil {
+		return nil, fmt.Errorf("build strict reviewer output contract: %w", err)
+	}
+	req := &llm.Request{MaxTokens: 8192, System: system, PromptVersion: "v2", Temperature: &temperature, Messages: []llm.Message{{Role: "user", Content: string(prompt)}}}
 	if in.TargetDifficulty > 0 {
 		req.System += s3TrainingReviewerGuidanceV1
 	}
@@ -1505,20 +1511,9 @@ func (a *Activities) S3StrictReviewerActivityV1(ctx context.Context, in S3Strict
 		applyLLMRuntime(req, &copyRuntime)
 	}
 	activity.RecordHeartbeat(ctx, "reviewing complete S3 manifest and visible assets")
-	response, providerArtifact, err := a.completeLLMWithProvenance(ctx, "s3_strict_reviewer_v1", req, 2)
+	assessment, providerArtifact, sources, err := a.completeS3ReviewerFormatV2(ctx, req, in.TargetDifficulty > 0)
 	if err != nil {
-		return nil, wrapRequiredProviderEffectError("strict S3 reviewer", err)
-	}
-	if response == nil || providerArtifact == nil || providerArtifact.LLMCallReceipt == nil || response.StopReason == "max_tokens" {
-		return nil, s3ContractErrorV1("strict reviewer provider response is missing identity or truncated")
-	}
-	assessmentBytes := []byte(strings.TrimSpace(response.Text()))
-	assessment, err := qualitygate.DecodeReviewAssessmentV1(assessmentBytes)
-	if in.TargetDifficulty > 0 {
-		assessment, err = qualitygate.DecodeTrainingReviewAssessmentV1(assessmentBytes)
-	}
-	if err != nil {
-		return nil, s3ContractErrorV1("strict reviewer response: %v", err)
+		return nil, err
 	}
 	canonical, assessmentSHA, err := qualitygate.CanonicalReviewAssessmentV1(assessment)
 	if err != nil {
@@ -1531,7 +1526,166 @@ func (a *Activities) S3StrictReviewerActivityV1(ctx context.Context, in S3Strict
 	if assessmentRef.SHA256 != assessmentSHA {
 		return nil, fmt.Errorf("review assessment CAS identity mismatch")
 	}
-	return &S3StrictReviewerResultV1{PayloadVersion: S3QualityPayloadVersionV1, Reviewer: qualitygate.ReviewerEvidenceV1{Evidence: s3EvidenceAssetV1(*assessmentRef), AssessmentSHA256: assessmentSHA, Assessment: assessment}, AssessmentArtifact: assessmentRef, ProviderArtifact: providerArtifact}, nil
+	return &S3StrictReviewerResultV1{PayloadVersion: S3QualityPayloadVersionV1, Reviewer: qualitygate.ReviewerEvidenceV1{Evidence: s3EvidenceAssetV1(*assessmentRef), AssessmentSHA256: assessmentSHA, Assessment: assessment}, AssessmentArtifact: assessmentRef, ProviderArtifact: providerArtifact, SourceArtifacts: sources}, nil
+}
+
+func s3ReviewerOutputPromptV2(training bool) (string, error) {
+	var omitted map[reflect.Type][]string
+	if !training {
+		omitted = map[reflect.Type][]string{reflect.TypeOf(qualitygate.ReviewAssessmentV1{}): {"estimated_difficulty", "difficulty_explanation"}}
+	}
+	schema, err := closedModelJSONSchemaV2(reflect.TypeOf(qualitygate.ReviewAssessmentV1{}), omitted)
+	if err != nil {
+		return "", err
+	}
+	return s3StrictReviewerSystemPromptV1 + "\n\nExact output field/type contract (not an example assessment):\n" + schema +
+		"\nSet schema_version to algoforge.quality-review-assessment.v1. approved must be a boolean. Each of the five dimensions is an object with an integer score from 0 to 10 and nonempty notes, never a bare score or string. Use an explicit blockers array (empty only if no grounded blockers exist). Each blocker has code, responsible_asset and witness; witness has runner, fixture_ref and assertion. Preserve the actual review conclusions; no score or approved value in this format contract is a recommended outcome.", nil
+}
+
+// Format repair has its own durable effect identity. Activity redelivery reuses
+// both responses, while a malformed reply cannot cause unbounded model calls.
+func (a *Activities) completeS3ReviewerFormatV2(ctx context.Context, request *llm.Request, training bool) (qualitygate.ReviewAssessmentV1, *ArtifactRef, []*ArtifactRef, error) {
+	req := *request
+	req.Messages = append([]llm.Message(nil), request.Messages...)
+	var sources []*ArtifactRef
+	original := ""
+	for attempt := 0; attempt < 2; attempt++ {
+		key := "s3_strict_reviewer_v2"
+		if attempt == 1 {
+			key = "s3_strict_reviewer_v2_format_repair_1"
+		}
+		response, source, err := a.completeLLMWithProvenance(ctx, key, &req, 2)
+		if source != nil {
+			sources = append(sources, source)
+		}
+		if err != nil {
+			return qualitygate.ReviewAssessmentV1{}, source, sources, wrapRequiredProviderEffectError("strict S3 reviewer", err)
+		}
+		if response == nil || source == nil || source.LLMCallReceipt == nil {
+			return qualitygate.ReviewAssessmentV1{}, source, sources, s3ContractErrorV1("strict reviewer provider response is missing identity")
+		}
+		if modelResponseTruncatedV2(response) {
+			return qualitygate.ReviewAssessmentV1{}, source, sources, temporal.NewNonRetryableApplicationError("strict reviewer response was truncated at token limit", "ReviewerTruncatedError", nil)
+		}
+		text := strings.TrimSpace(response.Text())
+		assessment, decodeErr := qualitygate.DecodeReviewAssessmentV1([]byte(text))
+		if training {
+			assessment, decodeErr = qualitygate.DecodeTrainingReviewAssessmentV1([]byte(text))
+		}
+		if decodeErr == nil {
+			if attempt == 1 {
+				if err := s3ReviewerCorrectionPreservesConclusionsV2(original, assessment); err != nil {
+					return qualitygate.ReviewAssessmentV1{}, source, sources, s3ContractErrorV1("strict reviewer format correction changed review conclusions: %v", err)
+				}
+			}
+			return assessment, source, sources, nil
+		}
+		formatError := s3ReviewerResponseFormatErrorV2(text)
+		if formatError && attempt == 1 {
+			return qualitygate.ReviewAssessmentV1{}, source, sources, temporal.NewNonRetryableApplicationError("strict reviewer format remains invalid after one correction: "+decodeErr.Error(), "ReviewerFormatError", decodeErr)
+		}
+		if !formatError {
+			return qualitygate.ReviewAssessmentV1{}, source, sources, s3ContractErrorV1("strict reviewer response: %v", decodeErr)
+		}
+		original = text
+		req.Messages = append(req.Messages, llm.Message{Role: "assistant", Content: text}, llm.Message{Role: "user", Content: "The review response failed JSON format validation: " + decodeErr.Error() + ". Correct ONLY its JSON field names, types, nesting and missing required fields. Return a COMPLETE object following the exact output contract. Preserve approved, all valid scores, notes, blocker conclusions and existing visible references; never raise scores, remove defects or invent evidence to pass validation. Do not request hidden inputs or add unknown fields, Markdown or commentary."})
+	}
+	return qualitygate.ReviewAssessmentV1{}, nil, sources, temporal.NewNonRetryableApplicationError("strict reviewer format correction exhausted", "ReviewerFormatError", nil)
+}
+
+// Read known values only to reject a changed conclusion; this never accepts or
+// maps a malformed response into an assessment. The corrected response must
+// independently pass the original strict decoder and witness checks.
+func s3ReviewerCorrectionPreservesConclusionsV2(original string, corrected qualitygate.ReviewAssessmentV1) error {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal([]byte(original), &fields) != nil {
+		return nil
+	}
+	var approved bool
+	if raw := fields["approved"]; string(raw) != "null" && json.Unmarshal(raw, &approved) == nil && approved != *corrected.Approved {
+		return fmt.Errorf("approved changed")
+	}
+	var dimensions map[string]map[string]json.RawMessage
+	if json.Unmarshal(fields["dimensions"], &dimensions) == nil {
+		for name, next := range map[string]*qualitygate.ReviewDimensionV1{"clarity": corrected.Dimensions.Clarity, "correctness": corrected.Dimensions.Correctness, "test_coverage": corrected.Dimensions.TestCoverage, "difficulty_calibration": corrected.Dimensions.DifficultyCalibration, "tag_accuracy": corrected.Dimensions.TagAccuracy} {
+			var score int
+			if raw := dimensions[name]["score"]; string(raw) != "null" && json.Unmarshal(raw, &score) == nil && score >= 0 && score <= 10 && score != *next.Score {
+				return fmt.Errorf("%s score changed", name)
+			}
+			var notes string
+			if json.Unmarshal(dimensions[name]["notes"], &notes) == nil && strings.TrimSpace(notes) != "" && notes != next.Notes {
+				return fmt.Errorf("%s notes changed", name)
+			}
+		}
+	}
+	var blockers []qualitygate.ReviewBlockerV1
+	if json.Unmarshal(fields["blockers"], &blockers) == nil && blockers != nil {
+		for _, blocker := range blockers {
+			if blocker.Validate() != nil {
+				return nil
+			}
+		}
+		known := corrected
+		known.Blockers = blockers
+		before, _, err := qualitygate.CanonicalReviewAssessmentV1(known)
+		if err != nil {
+			return err
+		}
+		after, _, err := qualitygate.CanonicalReviewAssessmentV1(corrected)
+		if err != nil || string(before) != string(after) {
+			return fmt.Errorf("blocker conclusions or visible references changed")
+		}
+	}
+	return nil
+}
+
+func s3ReviewerResponseFormatErrorV2(text string) bool {
+	if len(text) > 64<<10 {
+		return false
+	}
+	if err := validateExactJSONKeysV1(text, reflect.TypeOf(qualitygate.ReviewAssessmentV1{})); err != nil {
+		return true
+	}
+	var decoded qualitygate.ReviewAssessmentV1
+	if err := json.Unmarshal([]byte(text), &decoded); err != nil {
+		return true
+	}
+	if decoded.SchemaVersion == "" || decoded.Approved == nil || decoded.Dimensions == nil || decoded.Blockers == nil {
+		return true
+	}
+	for _, dimension := range []*qualitygate.ReviewDimensionV1{decoded.Dimensions.Clarity, decoded.Dimensions.Correctness, decoded.Dimensions.TestCoverage, decoded.Dimensions.DifficultyCalibration, decoded.Dimensions.TagAccuracy} {
+		if dimension == nil || dimension.Score == nil {
+			return true
+		}
+	}
+	var fields map[string]json.RawMessage
+	_ = json.Unmarshal([]byte(text), &fields)
+	var dimensions map[string]map[string]json.RawMessage
+	_ = json.Unmarshal(fields["dimensions"], &dimensions)
+	for _, dimension := range dimensions {
+		if _, exists := dimension["notes"]; !exists {
+			return true
+		}
+	}
+	var blockers []map[string]json.RawMessage
+	_ = json.Unmarshal(fields["blockers"], &blockers)
+	for _, blocker := range blockers {
+		for _, field := range []string{"code", "responsible_asset", "witness"} {
+			if _, exists := blocker[field]; !exists {
+				return true
+			}
+		}
+		var witness map[string]json.RawMessage
+		_ = json.Unmarshal(blocker["witness"], &witness)
+		for _, field := range []string{"runner", "fixture_ref", "assertion"} {
+			if _, exists := witness[field]; !exists {
+				return true
+			}
+		}
+	}
+	// A fully shaped response with invalid scores, empty notes or an invalid
+	// witness is a review contract failure, not a request to regrade the task.
+	return false
 }
 
 const s3StrictReviewerSystemPromptV1 = `You are the isolated R reviewer for AlgoForge S3. Review every TestManifest v2 entry and every supplied visible asset. Hidden-regression inputs are intentionally unavailable.

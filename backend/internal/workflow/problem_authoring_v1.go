@@ -123,16 +123,45 @@ func validateAuthoringWorkflowResultV1(
 	if result.BundleArtifact == nil || result.BundleArtifact.SHA256 != result.BundleSHA256 {
 		return fmt.Errorf("authoring result bundle artifact identity mismatch")
 	}
-	if len(result.SourceArtifacts) != 2 || result.SourceArtifacts[0] == nil || result.SourceArtifacts[1] == nil {
-		return fmt.Errorf("authoring result requires raw-response and bundle artifacts")
+	if len(result.SourceArtifacts) != 2 && len(result.SourceArtifacts) != 3 {
+		return fmt.Errorf("authoring result requires raw-response, optional one format correction, and bundle artifacts")
 	}
-	if !authoringWorkflowIsSHA256V1(result.SourceArtifacts[0].SHA256) ||
-		result.SourceArtifacts[0].LLMCallReceipt == nil ||
-		!authoringWorkflowIsSHA256V1(result.SourceArtifacts[0].LLMCallReceipt.RequestSHA256) {
-		return fmt.Errorf("authoring result raw source artifact lacks immutable request identity")
+	last := len(result.SourceArtifacts) - 1
+	for _, source := range result.SourceArtifacts[:last] {
+		if source == nil || !authoringWorkflowIsSHA256V1(source.SHA256) || source.LLMCallReceipt == nil || !authoringWorkflowIsSHA256V1(source.LLMCallReceipt.RequestSHA256) {
+			return fmt.Errorf("authoring result raw source artifact lacks immutable request identity")
+		}
 	}
-	if result.SourceArtifacts[1].SHA256 != result.BundleSHA256 || !reflect.DeepEqual(result.SourceArtifacts[1], result.BundleArtifact) {
+	if result.SourceArtifacts[last] == nil || result.SourceArtifacts[last].SHA256 != result.BundleSHA256 || !reflect.DeepEqual(result.SourceArtifacts[last], result.BundleArtifact) {
 		return fmt.Errorf("authoring result source artifact list does not end with the bundle")
+	}
+	if last == 2 {
+		// The optional original malformed reply is audit evidence only. The
+		// final provider response precedes the bundle and has its own server
+		// prompt identity; the activity binds the bundle to that final receipt.
+		if err := result.BundleArtifact.Validate(result.BundleArtifact.Bucket); err != nil {
+			return fmt.Errorf("authoring result corrected bundle artifact is invalid: %w", err)
+		}
+		for _, source := range result.SourceArtifacts[:last] {
+			if err := source.Validate(result.BundleArtifact.Bucket); err != nil {
+				return fmt.Errorf("authoring result format-correction source artifact is invalid: %w", err)
+			}
+			if source.WorkflowID != result.BundleArtifact.WorkflowID || source.Producer != result.BundleArtifact.Producer {
+				return fmt.Errorf("authoring result format-correction ancestry belongs to a different workflow or producer")
+			}
+			receipt := source.LLMCallReceipt
+			if receipt.SchemaVersion != 1 || strings.TrimSpace(receipt.RequestedModel) == "" || receipt.Provider != source.Provider || !authoringWorkflowIsSHA256V1(receipt.EndpointID) || !authoringWorkflowIsSHA256V1(receipt.PromptHash) {
+				return fmt.Errorf("authoring result format-correction source receipt lacks complete provider identity")
+			}
+		}
+		original := result.SourceArtifacts[0].LLMCallReceipt
+		final := result.SourceArtifacts[1].LLMCallReceipt
+		if original.PromptID != activities.AuthoringPlanPromptIDV2 || final.PromptID != activities.AuthoringPlanFormatRepairPromptIDV2 || original.PromptVersion != "v2" || final.PromptVersion != "v2" || original.RequestSHA256 == final.RequestSHA256 {
+			return fmt.Errorf("authoring result format-correction source receipt identity is invalid")
+		}
+		if original.RequestedModel != final.RequestedModel || original.Provider != final.Provider || original.EndpointID != final.EndpointID {
+			return fmt.Errorf("authoring result format correction changed its provider route")
+		}
 	}
 
 	switch result.GateReasonCode {
