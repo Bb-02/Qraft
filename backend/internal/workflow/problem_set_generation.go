@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Gingoo-TvT/Qraft/backend/internal/domain"
+	"github.com/Gingoo-TvT/Qraft/backend/internal/generationapi"
 	"github.com/Gingoo-TvT/Qraft/backend/internal/workflow/activities"
 	"github.com/google/uuid"
 	enumspb "go.temporal.io/api/enums/v1"
@@ -33,11 +34,13 @@ type ProblemSetFinishInput struct {
 	Ref       domain.ProblemSetGenerationRef `json:"ref"`
 	Error     string                         `json:"error,omitempty"`
 	Cancelled bool                           `json:"cancelled"`
+	Failure   *domain.GenerationFailure      `json:"failure,omitempty"`
 }
 
 // One run handles a small page. Durable slot checkpoints and ContinueAsNew keep
 // a 1000-item set's history bounded; no web request has to remain connected.
 func ProblemSetGenerationWorkflow(ctx workflow.Context, ref domain.ProblemSetGenerationRef) (retErr error) {
+	readableFailures := workflow.GetVersion(ctx, "problem-set-readable-failures-v1", workflow.DefaultVersion, 1) >= 1
 	fast := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: 5 * time.Minute, RetryPolicy: &temporal.RetryPolicy{InitialInterval: time.Second, MaximumAttempts: 5}})
 	defer func() {
 		if retErr == nil || workflow.IsContinueAsNewError(retErr) {
@@ -45,7 +48,12 @@ func ProblemSetGenerationWorkflow(ctx workflow.Context, ref domain.ProblemSetGen
 		}
 		clean, _ := workflow.NewDisconnectedContext(ctx)
 		clean = workflow.WithActivityOptions(clean, workflow.ActivityOptions{StartToCloseTimeout: time.Minute, RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 5}})
-		_ = workflow.ExecuteActivity(clean, "FinishProblemSetGenerationActivity", ProblemSetFinishInput{Ref: ref, Error: retErr.Error(), Cancelled: temporal.IsCanceledError(retErr) || ctx.Err() != nil}).Get(clean, nil)
+		input := ProblemSetFinishInput{Ref: ref, Error: retErr.Error(), Cancelled: temporal.IsCanceledError(retErr) || ctx.Err() != nil}
+		if readableFailures {
+			input.Failure = generationapi.DescribeFailure(retErr)
+			input.Error = input.Failure.Message
+		}
+		_ = workflow.ExecuteActivity(clean, "FinishProblemSetGenerationActivity", input).Get(clean, nil)
 	}()
 	planCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: 15 * time.Minute, HeartbeatTimeout: 60 * time.Second, RetryPolicy: &temporal.RetryPolicy{InitialInterval: 2 * time.Second, MaximumAttempts: 3, NonRetryableErrorTypes: []string{"InvalidSetPlan", "SetGenerationChanged"}}})
 	var batch ProblemSetBatch
@@ -101,11 +109,25 @@ func runProblemSetSlot(ctx, fast workflow.Context, ref domain.ProblemSetGenerati
 				if err == nil {
 					var id uuid.UUID
 					id, err = uuid.Parse(result.StoredProblemID)
-					if err == nil && (result.Decision != "pass" || id == uuid.Nil) {
+					if err == nil && id == uuid.Nil {
 						err = fmt.Errorf("编程题未通过质量校验")
 					}
 					if err == nil {
 						slot.ProblemID = &id
+						slot.DifficultyAssessment = result.DifficultyAssessment
+						if result.Decision != "pass" {
+							slot.Status = "awaiting_review"
+							if !problemQualityHasCompleteAssetsV1(&result) {
+								slot.Status = "failed"
+								slot.Regenerate = true
+							}
+							slot.Failure = result.Failure
+							if slot.Failure == nil {
+								slot.Failure = problemQualityFailureV1(&result)
+							}
+							slot.Error = slot.Failure.Message
+							return workflow.ExecuteActivity(fast, "RecordProblemSetSlotActivity", ProblemSetSlotInput{ref, slot}).Get(fast, nil)
+						}
 					}
 				}
 			}
@@ -138,7 +160,16 @@ func runProblemSetSlot(ctx, fast workflow.Context, ref domain.ProblemSetGenerati
 		slot.Status = "failed"
 		var rejected *temporal.ApplicationError
 		slot.Regenerate = errors.As(err, &rejected) && rejected.Type() == "ProblemSetSlotRejected"
-		slot.Error = err.Error()
+		if workflow.GetVersion(ctx, "problem-set-readable-failures-v1", workflow.DefaultVersion, 1) >= 1 {
+			if slot.ProblemID != nil && slot.Failure != nil {
+				slot.Status = "awaiting_review"
+			} else {
+				slot.Failure = generationapi.DescribeFailure(err)
+			}
+			slot.Error = slot.Failure.Message
+		} else {
+			slot.Error = err.Error()
+		}
 		return workflow.ExecuteActivity(fast, "RecordProblemSetSlotActivity", ProblemSetSlotInput{ref, slot}).Get(fast, nil)
 	}
 	return nil

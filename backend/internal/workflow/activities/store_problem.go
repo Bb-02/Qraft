@@ -582,6 +582,10 @@ func (a *Activities) StoreProblemActivity(ctx context.Context, input StoreInput)
 	if input.ImportSource != nil || input.QualityPassDraft != nil {
 		status = domain.ProblemStatusDraft
 		quarantineReason = ""
+		if input.QualityPassDraft != nil && input.QualityPassDraft.Decision == "quarantine" {
+			status = domain.ProblemStatusQuarantined
+			quarantineReason = "自动检查尚未全部通过，请审核候选题后人工确认"
+		}
 	} else if input.ReviewQuarantine != nil {
 		status, quarantineReason, err = a.deps.ProblemRepo.ApplyReviewQuarantine(ctx, repository.ReviewQuarantineRecord{
 			ProblemID:          problemID,
@@ -1135,6 +1139,9 @@ func initialStoreProblemStatus(input StoreInput) domain.ProblemStatus {
 		return domain.ProblemStatusDraft
 	}
 	if input.QualityPassDraft != nil {
+		if input.QualityPassDraft.Decision == "quarantine" {
+			return domain.ProblemStatusQuarantined
+		}
 		return domain.ProblemStatusDraft
 	}
 	if input.ReviewQuarantine != nil {

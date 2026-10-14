@@ -70,6 +70,7 @@ type ProblemSetGenerationState struct {
 	Brief             string                     `json:"brief,omitempty"`
 	Slots             []ProblemSetGenerationSlot `json:"slots"`
 	Error             string                     `json:"error,omitempty"`
+	Failure           *GenerationFailure         `json:"failure,omitempty"`
 	StartedAt         time.Time                  `json:"started_at"`
 	UpdatedAt         time.Time                  `json:"updated_at"`
 }
@@ -87,21 +88,23 @@ func (s *ProblemSetGenerationState) FindSlot(position int) *ProblemSetGeneration
 }
 
 type ProblemSetGenerationSlot struct {
-	Position       int            `json:"position"`
-	Type           QuizType       `json:"type"`
-	Score          int            `json:"score"`
-	Title          string         `json:"title,omitempty"`
-	Brief          string         `json:"brief,omitempty"`
-	Tags           []string       `json:"tags,omitempty"`
-	Level          ProblemLevel   `json:"level,omitempty"`
-	Difficulty     int            `json:"difficulty,omitempty"`
-	QuizDifficulty QuizDifficulty `json:"quiz_difficulty,omitempty"`
-	Status         string         `json:"status"`
-	Regenerate     bool           `json:"regenerate,omitempty"`
-	Attempt        int            `json:"attempt"`
-	Fingerprint    string         `json:"fingerprint,omitempty"`
-	ChildID        string         `json:"child_id,omitempty"`
-	ProblemID      *uuid.UUID     `json:"problem_id,omitempty"`
-	QuizID         *uuid.UUID     `json:"quiz_id,omitempty"`
-	Error          string         `json:"error,omitempty"`
+	Position             int                             `json:"position"`
+	Type                 QuizType                        `json:"type"`
+	Score                int                             `json:"score"`
+	Title                string                          `json:"title,omitempty"`
+	Brief                string                          `json:"brief,omitempty"`
+	Tags                 []string                        `json:"tags,omitempty"`
+	Level                ProblemLevel                    `json:"level,omitempty"`
+	Difficulty           int                             `json:"difficulty,omitempty"`
+	QuizDifficulty       QuizDifficulty                  `json:"quiz_difficulty,omitempty"`
+	Status               string                          `json:"status"`
+	Regenerate           bool                            `json:"regenerate,omitempty"`
+	Attempt              int                             `json:"attempt"`
+	Fingerprint          string                          `json:"fingerprint,omitempty"`
+	ChildID              string                          `json:"child_id,omitempty"`
+	ProblemID            *uuid.UUID                      `json:"problem_id,omitempty"`
+	QuizID               *uuid.UUID                      `json:"quiz_id,omitempty"`
+	Error                string                          `json:"error,omitempty"`
+	Failure              *GenerationFailure              `json:"failure,omitempty"`
+	DifficultyAssessment *GenerationDifficultyAssessment `json:"difficulty_assessment,omitempty"`
 }

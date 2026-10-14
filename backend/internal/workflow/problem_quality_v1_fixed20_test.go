@@ -211,6 +211,8 @@ type fixed20LLM struct {
 	index               int
 	falseReviewer       bool
 	wrongMain           bool
+	targetDifficulty    int
+	reviewResponse      string
 	requests            []*llm.Request
 	verificationPrompts []string
 	reviewerPrompts     []string
@@ -233,6 +235,9 @@ func (f *fixed20LLM) CompleteWithRetry(_ context.Context, request *llm.Request, 
 	switch {
 	case strings.Contains(request.System, "G formalization stage"):
 		text, err = fixed20AuthoringResponse(f.index)
+		if f.targetDifficulty > 0 {
+			text = strings.Replace(text, `"target_difficulty":1500`, fmt.Sprintf(`"target_difficulty":%d`, f.targetDifficulty), 1)
+		}
 	case strings.Contains(request.System, "typed competitive-programming specification"):
 		text = `{"title":"Lantern Gathering","narrative":"Friends gather beneath warm lanterns."}`
 	case strings.Contains(request.System, "G implementation stage"):
@@ -255,6 +260,9 @@ func (f *fixed20LLM) CompleteWithRetry(_ context.Context, request *llm.Request, 
 		}
 		f.reviewerPrompts = append(f.reviewerPrompts, request.Messages[0].Content)
 		text, err = fixed20ReviewResponse(!f.falseReviewer)
+		if f.reviewResponse != "" {
+			text = f.reviewResponse
+		}
 	default:
 		return nil, fmt.Errorf("unexpected fixed20 LLM system prompt: %.120s", request.System)
 	}
@@ -642,6 +650,8 @@ func newFixed20Harness(t *testing.T, index int, scenario fixed20Scenario) *fixed
 type fixed20HarnessOptions struct {
 	remoteSandboxFactory activities.RemoteSandboxExecutorFactoryV1
 	sandboxIdentity      *activities.S3SandboxIdentityPolicyV1
+	noHiddenSuite        bool
+	noEmbedding          bool
 }
 
 func newFixed20HarnessWithOptions(t *testing.T, index int, scenario fixed20Scenario, options fixed20HarnessOptions) *fixed20Harness {
@@ -685,6 +695,14 @@ func newFixed20HarnessWithOptions(t *testing.T, index int, scenario fixed20Scena
 		S3SandboxIdentityPolicy:  identityPolicy,
 		HiddenSuiteResolver:      resolver,
 		HiddenRegressionExecutor: hidden,
+	}
+	if options.noHiddenSuite {
+		deps.HiddenSuiteResolver = nil
+		deps.HiddenRegressionExecutor = nil
+	}
+	if options.noEmbedding {
+		deps.EmbeddingEnabled = false
+		deps.Embedding = nil
 	}
 	acts := activities.New(deps)
 	params := domain.DefaultProblemGenParams()

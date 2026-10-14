@@ -91,6 +91,7 @@ func TestRouteAuthorizationMatrix(t *testing.T) {
 				e.Add(bits[0], bits[1], func(c echo.Context) error { return c.NoContent(http.StatusNoContent) })
 				path := strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(bits[1], ":invitation_id", "test"), ":item_id", "test"), ":id", "test")
 				path = strings.ReplaceAll(strings.ReplaceAll(path, ":purpose", "statement"), ":tid", "test")
+				path = strings.ReplaceAll(path, ":position", "3")
 				rec := httptest.NewRecorder()
 				e.ServeHTTP(rec, httptest.NewRequest(bits[0], path, nil))
 				expected := http.StatusNoContent
@@ -109,6 +110,22 @@ func TestRouteAuthorizationMatrix(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestProblemSetResumeAndReleaseApprovalAdministratorOnly(t *testing.T) {
+	for _, pattern := range []string{
+		"/api/v1/problem-sets/:id/generation/slots/:position/resume",
+		"/api/v1/problems/:id/public-release-approval",
+	} {
+		permission, known := PermissionForRoute(http.MethodPost, pattern)
+		if !known || permission != PermissionAdmin {
+			t.Fatalf("manual candidate approval or resume %s must remain administrator-only, got %q (known=%v)", pattern, permission, known)
+		}
+	}
+	permission, known := PermissionForRoute(http.MethodPost, "/api/v1/problem-sets/:id/generation")
+	if !known || permission != PermissionMember {
+		t.Fatalf("ordinary generation must retain its member permission, got %q (known=%v)", permission, known)
 	}
 }
 

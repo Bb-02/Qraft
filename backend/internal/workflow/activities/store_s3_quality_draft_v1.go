@@ -25,6 +25,7 @@ const (
 type S3QualityPassDraftEvidenceV1 struct {
 	SchemaVersion           string      `json:"schema_version"`
 	Decision                string      `json:"decision"`
+	Policy                  string      `json:"policy,omitempty"`
 	SubjectRevision         string      `json:"subject_revision"`
 	EvidenceLevel           string      `json:"evidence_level"`
 	AuditArtifact           ArtifactRef `json:"audit_artifact"`
@@ -38,21 +39,23 @@ type S3QualityPassDraftEvidenceV1 struct {
 }
 
 type StoreS3QualityDraftInputV1 struct {
-	PayloadVersion          int                     `json:"payload_version"`
-	WorkflowID              string                  `json:"workflow_id"`
-	SubjectRevision         string                  `json:"subject_revision"`
-	FrozenConcept           string                  `json:"frozen_concept"`
-	Language                string                  `json:"language"`
-	EvidenceLevel           string                  `json:"evidence_level"`
-	Params                  domain.ProblemGenParams `json:"params"`
-	AuthoringBundleArtifact ArtifactRef             `json:"authoring_bundle_artifact"`
-	StatementDraftArtifact  ArtifactRef             `json:"statement_draft_artifact"`
-	FinalStatementArtifact  ArtifactRef             `json:"final_statement_artifact"`
-	MainProgramArtifact     ArtifactRef             `json:"main_program_artifact"`
-	OracleProgramArtifact   ArtifactRef             `json:"oracle_program_artifact"`
-	OracleReceiptArtifact   ArtifactRef             `json:"oracle_receipt_artifact"`
-	TestManifestArtifact    ArtifactRef             `json:"test_manifest_artifact"`
-	AuditArtifact           ArtifactRef             `json:"audit_artifact"`
+	PayloadVersion          int                                    `json:"payload_version"`
+	WorkflowID              string                                 `json:"workflow_id"`
+	SubjectRevision         string                                 `json:"subject_revision"`
+	FrozenConcept           string                                 `json:"frozen_concept"`
+	Language                string                                 `json:"language"`
+	EvidenceLevel           string                                 `json:"evidence_level"`
+	Params                  domain.ProblemGenParams                `json:"params"`
+	Failure                 *domain.GenerationFailure              `json:"failure,omitempty"`
+	DifficultyAssessment    *domain.GenerationDifficultyAssessment `json:"difficulty_assessment,omitempty"`
+	AuthoringBundleArtifact ArtifactRef                            `json:"authoring_bundle_artifact"`
+	StatementDraftArtifact  ArtifactRef                            `json:"statement_draft_artifact"`
+	FinalStatementArtifact  ArtifactRef                            `json:"final_statement_artifact"`
+	MainProgramArtifact     ArtifactRef                            `json:"main_program_artifact"`
+	OracleProgramArtifact   ArtifactRef                            `json:"oracle_program_artifact"`
+	OracleReceiptArtifact   ArtifactRef                            `json:"oracle_receipt_artifact"`
+	TestManifestArtifact    ArtifactRef                            `json:"test_manifest_artifact"`
+	AuditArtifact           ArtifactRef                            `json:"audit_artifact"`
 }
 
 type StoreS3QualityDraftResultV1 struct {
@@ -76,7 +79,11 @@ func (a *Activities) StoreS3QualityDraftActivityV1(ctx context.Context, in Store
 	if err != nil {
 		return nil, err
 	}
-	if stored == nil || stored.ProblemID == uuid.Nil || stored.Status != domain.ProblemStatusDraft {
+	wantStatus := domain.ProblemStatusDraft
+	if in.Failure != nil && in.Params.IsProblemSetGeneration() {
+		wantStatus = domain.ProblemStatusQuarantined
+	}
+	if stored == nil || stored.ProblemID == uuid.Nil || stored.Status != wantStatus {
 		return nil, fmt.Errorf("quality draft Store returned an invalid result")
 	}
 	return &StoreS3QualityDraftResultV1{
@@ -139,8 +146,11 @@ func (a *Activities) buildS3QualityDraftStoreInputV1(ctx context.Context, in Sto
 	if err != nil || !bytes.Equal(canonicalAudit, auditBytes) || auditSHA != in.AuditArtifact.SHA256 {
 		return nil, fmt.Errorf("quality audit CAS is not canonical")
 	}
-	if err := validateS3QualityPassAuditV1(audit, in.WorkflowID, in.SubjectRevision); err != nil {
+	if err := validateS3MaterializationAuditV1(audit, in.WorkflowID, in.SubjectRevision, in.Params.IsProblemSetGeneration() && in.Failure != nil); err != nil {
 		return nil, err
+	}
+	if audit.Policy != s3QualityPolicyForParamsV1(in.Params) {
+		return nil, fmt.Errorf("quality policy does not match the server-owned authoring context")
 	}
 
 	draftBytes, err := a.artifacts.Get(ctx, in.StatementDraftArtifact)
@@ -213,7 +223,7 @@ func (a *Activities) buildS3QualityDraftStoreInputV1(ctx context.Context, in Sto
 	}
 
 	qualityEvidence := &S3QualityPassDraftEvidenceV1{
-		SchemaVersion: S3QualityDraftEvidenceSchemaV1, Decision: qualitygate.DecisionPass,
+		SchemaVersion: S3QualityDraftEvidenceSchemaV1, Decision: audit.Decision, Policy: audit.Policy,
 		SubjectRevision: in.SubjectRevision, EvidenceLevel: in.EvidenceLevel,
 		AuditArtifact: in.AuditArtifact, AuthoringBundleArtifact: in.AuthoringBundleArtifact,
 		StatementDraftArtifact: in.StatementDraftArtifact, FinalStatementArtifact: in.FinalStatementArtifact,
@@ -221,6 +231,12 @@ func (a *Activities) buildS3QualityDraftStoreInputV1(ctx context.Context, in Sto
 		OracleReceiptArtifact: in.OracleReceiptArtifact, TestManifestArtifact: in.TestManifestArtifact,
 	}
 	storeParams := s3QualityDraftStoreParamsV1(in.Params, in.EvidenceLevel)
+	if in.DifficultyAssessment != nil {
+		storeParams.MetadataExtras["generation_difficulty"] = in.DifficultyAssessment
+	}
+	if audit.Decision != qualitygate.DecisionPass {
+		storeParams.MetadataExtras["generation_candidate"] = map[string]interface{}{"complete": true, "failure": in.Failure, "context": in.Params.ProblemSetContext}
+	}
 	return &StoreInput{
 		PayloadVersion: StoreProblemS3QualityDraftPayloadVersion,
 		IdempotencyKey: in.WorkflowID + "/store-s3-quality-draft/v1",
@@ -285,8 +301,30 @@ func validateS3QualityPassAuditV1(audit qualitygate.AuditV1, workflowID, revisio
 		return fmt.Errorf("quality audit is not a complete nine-gate PASS")
 	}
 	for index, gate := range audit.GateResults {
-		if gate.Gate != want[index] || gate.Status != qualitygate.GateStatusPass {
+		optionalHidden := audit.Policy == qualitygate.PolicyProblemSetTraining && gate.Gate == qualitygate.GateHiddenRegression && gate.Status == qualitygate.GateStatusNotConfigured
+		if gate.Gate != want[index] || (gate.Status != qualitygate.GateStatusPass && !optionalHidden) {
 			return fmt.Errorf("quality audit gate %d is not the canonical PASS", index)
+		}
+	}
+	return nil
+}
+
+func validateS3MaterializationAuditV1(audit qualitygate.AuditV1, workflowID, revision string, allowReview bool) error {
+	_, ruleSHA, err := qualitygate.CanonicalRuleForPolicyV1(audit.Policy)
+	if err != nil || audit.RuleSHA256 != ruleSHA {
+		return fmt.Errorf("quality audit rule does not match its authoring policy")
+	}
+	if !allowReview || audit.Decision == qualitygate.DecisionPass {
+		return validateS3QualityPassAuditV1(audit, workflowID, revision)
+	}
+	want := []string{qualitygate.GateSpecLint, qualitygate.GateSampleOutputBinding, qualitygate.GateOracleDifferential, qualitygate.GateSanitizer, qualitygate.GateBoundaryCoverage, qualitygate.GateTestManifest, qualitygate.GateReviewerSchemaVerdict, qualitygate.GateDedup, qualitygate.GateHiddenRegression}
+	if audit.SubjectID != workflowID || audit.SubjectRevision != revision || audit.Decision != qualitygate.DecisionQuarantine || len(audit.BlockingIssues) == 0 || len(audit.GateResults) != len(want) {
+		return fmt.Errorf("review candidate must preserve its complete original quality audit")
+	}
+	for index, gate := range audit.GateResults {
+		optionalHidden := audit.Policy == qualitygate.PolicyProblemSetTraining && gate.Gate == qualitygate.GateHiddenRegression && gate.Status == qualitygate.GateStatusNotConfigured
+		if gate.Gate != want[index] || (gate.Status != qualitygate.GateStatusPass && gate.Status != qualitygate.GateStatusBlocked && gate.Status != qualitygate.GateStatusCheckFailed && !optionalHidden) {
+			return fmt.Errorf("review candidate has an invalid gate record")
 		}
 	}
 	return nil
@@ -303,7 +341,8 @@ func (a *Activities) validateS3QualityPassDraftStoreInputV1(ctx context.Context,
 	if a == nil || a.artifacts == nil || evidence == nil || input.TestManifestV2 == nil || input.TestManifest != nil || input.ReviewQuarantine != nil || input.Params.GenerationEvidence != nil {
 		return fmt.Errorf("S3 quality draft Store contract is incomplete or mixed with legacy evidence")
 	}
-	if evidence.SchemaVersion != S3QualityDraftEvidenceSchemaV1 || evidence.Decision != qualitygate.DecisionPass ||
+	if evidence.SchemaVersion != S3QualityDraftEvidenceSchemaV1 ||
+		(evidence.Decision != qualitygate.DecisionPass && !(input.Params.IsProblemSetGeneration() && evidence.Decision == qualitygate.DecisionQuarantine)) ||
 		evidence.SubjectRevision != evidence.FinalStatementArtifact.SHA256 ||
 		(evidence.EvidenceLevel != generationapi.EvidenceMinimal && evidence.EvidenceLevel != generationapi.EvidenceStandard && evidence.EvidenceLevel != generationapi.EvidenceAudit) ||
 		!generationapi.IsJobID(input.WorkflowID) {
@@ -348,7 +387,13 @@ func (a *Activities) validateS3QualityPassDraftStoreInputV1(ctx context.Context,
 	if err != nil || !bytes.Equal(canonicalAudit, auditBytes) || auditSHA != evidence.AuditArtifact.SHA256 {
 		return fmt.Errorf("S3 quality draft audit binding is invalid")
 	}
-	if err := validateS3QualityPassAuditV1(audit, input.WorkflowID, evidence.SubjectRevision); err != nil {
+	if audit.Decision != evidence.Decision || audit.Policy != evidence.Policy {
+		return fmt.Errorf("S3 materialization decision does not match the original audit")
+	}
+	if evidence.Policy != s3QualityPolicyForParamsV1(input.Params) {
+		return fmt.Errorf("quality policy is not authorized by the authoring context")
+	}
+	if err := validateS3MaterializationAuditV1(audit, input.WorkflowID, evidence.SubjectRevision, input.Params.IsProblemSetGeneration() && evidence.Decision == qualitygate.DecisionQuarantine); err != nil {
 		return err
 	}
 	for _, item := range refs {
@@ -378,6 +423,13 @@ func s3QualityDraftStoreParamsV1(params domain.ProblemGenParams, evidenceLevel s
 	audit["requested_evidence_level"] = evidenceLevel
 	result.MetadataExtras[generationapi.GenerationAuditMetadataKey] = audit
 	return result
+}
+
+func s3QualityPolicyForParamsV1(params domain.ProblemGenParams) string {
+	if params.IsProblemSetGeneration() {
+		return qualitygate.PolicyProblemSetTraining
+	}
+	return ""
 }
 
 func cloneS3QualityMetadataMapV1(source map[string]interface{}) map[string]interface{} {

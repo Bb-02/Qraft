@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/Gingoo-TvT/Qraft/backend/internal/domain"
+	"github.com/Gingoo-TvT/Qraft/backend/internal/generationapi"
 	"github.com/Gingoo-TvT/Qraft/backend/internal/service"
+	algoworkflow "github.com/Gingoo-TvT/Qraft/backend/internal/workflow"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/rs/zerolog/log"
@@ -202,7 +204,7 @@ func (h *WorkflowHandler) HandleGet(c echo.Context) error {
 
 	if info.Status == enums.WORKFLOW_EXECUTION_STATUS_RUNNING &&
 		(info.GetType().GetName() == problemGenerationWorkflowType ||
-			info.GetType().GetName() == problemValidationWorkflowType || info.GetType().GetName() == "RatingWorkflow" || info.GetType().GetName() == "ImportedProblemWorkflow") {
+			info.GetType().GetName() == problemValidationWorkflowType || info.GetType().GetName() == generationapi.QualityWorkflowTypeV1 || info.GetType().GetName() == "RatingWorkflow" || info.GetType().GetName() == "ImportedProblemWorkflow") {
 		queryState, err := h.queryWorkflowState(ctx, workflowID, info.Execution.RunId)
 		if err != nil {
 			// Older validation runs were created before the state query was
@@ -227,6 +229,24 @@ func (h *WorkflowHandler) HandleGet(c echo.Context) error {
 	if info.Status == enums.WORKFLOW_EXECUTION_STATUS_COMPLETED {
 		run := h.temporalClient.GetWorkflow(ctx, workflowID, "")
 		var state domain.WorkflowState
+		if info.GetType().GetName() == generationapi.QualityWorkflowTypeV1 {
+			var generated algoworkflow.ProblemGenerationQualityResultV1
+			if err := run.Get(ctx, &generated); err == nil {
+				state = domain.WorkflowState{ProblemID: generated.StoredProblemID, Status: domain.WorkflowStatusCompleted, CurrentStep: domain.StepStore, Progress: 100}
+				if generated.StoredProblemStatus == domain.ProblemStatusQuarantined {
+					state.Status = domain.WorkflowStatusRejectedQuarantined
+				}
+				if generated.Failure != nil {
+					state.Error = generated.Failure.Message
+					result["failure"] = generated.Failure
+				}
+				result["execution_status"] = info.Status.String()
+				result["status"] = state.Status
+				result["state"] = state
+				result["difficulty_assessment"] = generated.DifficultyAssessment
+			}
+			return ok(c, result)
+		}
 		if info.GetType().GetName() == "ImportedProblemWorkflow" {
 			var imported domain.ProblemImportItemResult
 			if err := run.Get(ctx, &imported); err == nil {
@@ -256,6 +276,7 @@ func (h *WorkflowHandler) HandleGet(c echo.Context) error {
 			// The Get() call for failed workflows returns an error whose
 			// message contains the failure reason.
 			result["failure_reason"] = err.Error()
+			result["failure"] = generationapi.DescribeFailure(err)
 		} else {
 			result["state"] = state
 		}

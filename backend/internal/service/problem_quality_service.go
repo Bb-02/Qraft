@@ -7,6 +7,7 @@ import (
 
 	"github.com/Gingoo-TvT/Qraft/backend/internal/domain"
 	"github.com/Gingoo-TvT/Qraft/backend/internal/qualityapi"
+	qualitygate "github.com/Gingoo-TvT/Qraft/backend/internal/qualitygate/v1"
 	speccontract "github.com/Gingoo-TvT/Qraft/backend/internal/spec"
 	"github.com/Gingoo-TvT/Qraft/backend/internal/workflow/activities"
 	"github.com/google/uuid"
@@ -139,7 +140,7 @@ func (s *ProblemQualityService) loadBinding(
 	if err != nil {
 		return nil, nil, err
 	}
-	binding, err := loadS3ExportBindingV1(ctx, problem, testCases, s.objects)
+	binding, err := loadProductS3ExportBindingV1(ctx, s.problems, problem, testCases, s.objects)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -221,6 +222,16 @@ func buildProblemQualityReportV1(problem *domain.Problem, binding *s3ExportBindi
 		publicationStatus = qualityapi.LayerStatusReady
 		publicationBasis = "published_state_revalidated_against_fresh_s3_binding"
 	}
+	standardStatus, standardBasis := qualityapi.LayerStatusPass, "canonical_nine_gate_audit_pass"
+	if binding.QualityAuditV1.Policy == qualitygate.PolicyProblemSetTraining {
+		standardBasis = "canonical_problem_set_training_policy_pass"
+	}
+	if binding.QualityAuditV1.Decision == qualitygate.DecisionQuarantine {
+		standardStatus, standardBasis = qualityapi.LayerStatusQuarantined, "original_automatic_quality_quarantine_preserved"
+	}
+	if binding.HumanApproved {
+		publicationStatus, publicationBasis = qualityapi.LayerStatusReady, "current_human_approval_and_assets_revalidated"
+	}
 	problemID := problem.ID.String()
 	return qualityapi.ProblemQualityReportV1{
 		SchemaVersion:             qualityapi.ProblemQualityReportSchemaV1,
@@ -229,6 +240,10 @@ func buildProblemQualityReportV1(problem *domain.Problem, binding *s3ExportBindi
 		SubjectRevision:           binding.SubjectRevision,
 		GenerationEvidenceProfile: binding.EvidenceLevel,
 		Decision:                  binding.QualityAuditV1.Decision,
+		Policy:                    binding.QualityAuditV1.Policy,
+		HumanApproved:             binding.HumanApproved,
+		Warnings:                  projectQualityFindingsV1(binding.QualityAuditV1.Warnings),
+		BlockingIssues:            projectQualityFindingsV1(binding.QualityAuditV1.BlockingIssues),
 		Evidence: qualityapi.QualityEvidenceV1{
 			Audit: qualityapi.EvidenceBindingV1{
 				Kind: "quality_audit", SchemaVersion: binding.QualityAuditV1.SchemaVersion,
@@ -243,7 +258,7 @@ func buildProblemQualityReportV1(problem *domain.Problem, binding *s3ExportBindi
 		},
 		Gates: gates,
 		Layers: []qualityapi.QualityLayerV1{
-			{Name: qualityapi.LayerStandard, Status: qualityapi.LayerStatusPass, Basis: "canonical_nine_gate_audit_pass", EvidenceSHA256: binding.QualityAuditRef.SHA256},
+			{Name: qualityapi.LayerStandard, Status: standardStatus, Basis: standardBasis, EvidenceSHA256: binding.QualityAuditRef.SHA256},
 			{Name: qualityapi.LayerVerified, Status: qualityapi.LayerStatusPass, Basis: "cas_and_persisted_testcase_binding_revalidated", EvidenceSHA256: binding.TestManifestRef.SHA256},
 			{Name: qualityapi.LayerPublicationReady, Status: publicationStatus, Basis: publicationBasis, EvidenceSHA256: binding.SubjectRevision},
 		},
@@ -263,4 +278,16 @@ func buildProblemQualityReportV1(problem *domain.Problem, binding *s3ExportBindi
 			Source:         "outside_algoforge_quality_evidence",
 		},
 	}, nil
+}
+
+func projectQualityFindingsV1(findings []qualitygate.BlockingIssueV1) []qualityapi.QualityFindingV1 {
+	if len(findings) == 0 {
+		return nil
+	}
+	result := make([]qualityapi.QualityFindingV1, len(findings))
+	for i, finding := range findings {
+		result[i] = qualityapi.QualityFindingV1{Source: finding.Source, Gate: finding.Gate, Code: finding.Code, ResponsibleAsset: finding.ResponsibleAsset,
+			Witness: qualityapi.QualityWitnessV1{Runner: finding.Witness.Runner, FixtureRef: finding.Witness.FixtureRef, Assertion: finding.Witness.Assertion}}
+	}
+	return result
 }

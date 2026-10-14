@@ -282,6 +282,7 @@ func RegisterProblemSetRoutes(group *echo.Group, handler *ProblemSetHandler) {
 		group.POST("/problem-sets/:id/generation", handler.HandleStartGeneration)
 		group.GET("/problem-sets/:id/generation", handler.HandleGenerationStatus)
 		group.POST("/problem-sets/:id/generation/cancel", handler.HandleCancelGeneration)
+		group.POST("/problem-sets/:id/generation/slots/:position/resume", handler.HandleResumeReviewedSlot)
 	}
 	group.POST("/problem-sets/assembly-preview", handler.HandleAssemblyPreview)
 	group.POST("/problem-sets/assemble", handler.HandleAssemble)

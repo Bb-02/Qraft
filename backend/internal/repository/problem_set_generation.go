@@ -104,6 +104,16 @@ func (r *ProblemSetRepository) ChangeGeneration(ctx context.Context, ref domain.
 // CompleteGenerationSlot commits the item and its completion marker together.
 // The source identity is stable across activity retries; an occupied slot is never replaced.
 func (r *ProblemSetRepository) CompleteGenerationSlot(ctx context.Context, ref domain.ProblemSetGenerationRef, result domain.ProblemSetGenerationSlot) error {
+	return r.completeGenerationSlot(ctx, ref, result, nil)
+}
+
+// CompleteReviewedGenerationSlot restores only the current, explicitly
+// approved programming candidate after its parent generation has stopped.
+func (r *ProblemSetRepository) CompleteReviewedGenerationSlot(ctx context.Context, ref domain.ProblemSetGenerationRef, result domain.ProblemSetGenerationSlot, expectedProblemUpdatedAt time.Time) error {
+	return r.completeGenerationSlot(ctx, ref, result, &expectedProblemUpdatedAt)
+}
+
+func (r *ProblemSetRepository) completeGenerationSlot(ctx context.Context, ref domain.ProblemSetGenerationRef, result domain.ProblemSetGenerationSlot, reviewedAt *time.Time) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return err
@@ -120,10 +130,27 @@ func (r *ProblemSetRepository) CompleteGenerationSlot(ctx context.Context, ref d
 	if slot == nil || slot.Type != result.Type || slot.ChildID != result.ChildID {
 		return ErrProblemSetGenerationChanged
 	}
+	if reviewedAt != nil {
+		if state.Active() {
+			return ErrProblemSetGenerationActive
+		}
+		if slot.Type != domain.QuizTypeProgramming || slot.ProblemID == nil || result.ProblemID == nil || *slot.ProblemID != *result.ProblemID || slot.Regenerate {
+			return ErrProblemSetGenerationChanged
+		}
+		var approved bool
+		err = tx.QueryRow(ctx, `SELECT p.status='published' AND p.updated_at=$2 AND problem_manual_release_approved(p)
+			FROM problems p WHERE p.id=$1 FOR SHARE`, *result.ProblemID, *reviewedAt).Scan(&approved)
+		if err != nil || !approved {
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+			return ErrProblemSetGenerationChanged
+		}
+	}
 	if slot.Status == "succeeded" {
 		return tx.Commit(ctx)
 	}
-	if !state.Active() {
+	if reviewedAt == nil && !state.Active() {
 		return ErrProblemSetGenerationChanged
 	}
 	if (result.ProblemID == nil) == (result.QuizID == nil) {
@@ -151,6 +178,22 @@ func (r *ProblemSetRepository) CompleteGenerationSlot(ctx context.Context, ref d
 	slot.QuizID = result.QuizID
 	slot.Status = "succeeded"
 	slot.Error = ""
+	slot.Failure = nil
+	if reviewedAt != nil {
+		remaining := 0
+		for _, other := range state.Slots {
+			if other.Status != "succeeded" {
+				remaining++
+			}
+		}
+		state.Status = "completed"
+		state.Error = ""
+		state.Failure = nil
+		if remaining > 0 {
+			state.Status = "partial"
+			state.Error = fmt.Sprintf("%d 道题尚未完成，可审核或重试这些题目", remaining)
+		}
+	}
 	if err = saveSetGeneration(ctx, tx, ref.SetID, state); err != nil {
 		return err
 	}

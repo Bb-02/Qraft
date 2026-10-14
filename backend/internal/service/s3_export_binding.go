@@ -18,16 +18,19 @@ import (
 )
 
 type s3ExportBindingV1 struct {
-	TestManifestV2     *activities.TestManifestV2
-	TestManifestRef    activities.ArtifactRef
-	AuthoringBundleRef activities.ArtifactRef
-	AuthoringBundleV1  *activities.AuthoringPlanBundleV1
-	QualityAuditV1     qualitygate.AuditV1
-	QualityAuditBytes  []byte
-	QualityAuditRef    activities.ArtifactRef
-	StatementDraftV1   *activities.StatementDraftBundleV1
-	EvidenceLevel      string
-	SubjectRevision    string
+	TestManifestV2      *activities.TestManifestV2
+	TestManifestRef     activities.ArtifactRef
+	AuthoringBundleRef  activities.ArtifactRef
+	AuthoringBundleV1   *activities.AuthoringPlanBundleV1
+	QualityAuditV1      qualitygate.AuditV1
+	QualityAuditBytes   []byte
+	QualityAuditRef     activities.ArtifactRef
+	StatementDraftV1    *activities.StatementDraftBundleV1
+	EvidenceLevel       string
+	SubjectRevision     string
+	MainProgramSHA256   string
+	OracleProgramSHA256 string
+	HumanApproved       bool
 }
 
 type s3ExportManifestMetadataV1 struct {
@@ -45,12 +48,16 @@ func loadS3ExportBindingV1(
 	problem *domain.Problem,
 	testCases []*domain.TestCase,
 	objects HydroObjectReader,
+	approvals ...*s3ManualReleaseApprovalV1,
 ) (*s3ExportBindingV1, error) {
 	fail := func(format string, args ...interface{}) (*s3ExportBindingV1, error) {
 		return nil, fmt.Errorf("%w: S3 export binding: %s", ErrConflict, fmt.Sprintf(format, args...))
 	}
 	if problem == nil || problem.ID == uuid.Nil {
 		return fail("persisted problem identity is missing")
+	}
+	if err := ensureCompleteGenerationCandidate(problem); err != nil {
+		return nil, err
 	}
 	if objects == nil {
 		return fail("object reader is missing")
@@ -79,8 +86,11 @@ func loadS3ExportBindingV1(
 	if err := decodeS3ExportStrictJSONV1(metadata[generationapi.S3QualityMaterializationMetadataKey], &evidence); err != nil {
 		return fail("%s metadata is invalid: %v", generationapi.S3QualityMaterializationMetadataKey, err)
 	}
-	if evidence.SchemaVersion != generationapi.S3QualityMaterializationSchemaV1 || evidence.Decision != qualitygate.DecisionPass {
-		return fail("%s must record the canonical pass decision", generationapi.S3QualityMaterializationMetadataKey)
+	manualApproved := len(approvals) == 1 && approvals[0] != nil && approvals[0].approved &&
+		approvals[0].problemID == problem.ID && approvals[0].updatedAt.Equal(problem.UpdatedAt) && problem.Status == domain.ProblemStatusPublished
+	if evidence.SchemaVersion != generationapi.S3QualityMaterializationSchemaV1 ||
+		(evidence.Decision != qualitygate.DecisionPass && (evidence.Decision != qualitygate.DecisionQuarantine || !manualApproved)) {
+		return fail("%s must record the canonical pass decision or a current human approval; 请先完成当前版本的人工审核", generationapi.S3QualityMaterializationMetadataKey)
 	}
 	if evidence.EvidenceLevel != generationapi.EvidenceMinimal && evidence.EvidenceLevel != generationapi.EvidenceStandard && evidence.EvidenceLevel != generationapi.EvidenceAudit {
 		return fail("S3 evidence level is unsupported")
@@ -123,6 +133,14 @@ func loadS3ExportBindingV1(
 			artifactBucket = item.ref.Bucket
 		} else if item.ref.Bucket != artifactBucket {
 			return fail("the eight S3 ArtifactRefs do not share one bucket")
+		}
+	}
+	// Reopen the programs and oracle receipt as well as the statement/tests.
+	// A human decision may override quality findings, never missing CAS bytes.
+	for _, ref := range []activities.ArtifactRef{evidence.AuthoringBundleArtifact, evidence.MainProgramArtifact, evidence.OracleProgramArtifact, evidence.OracleReceiptArtifact} {
+		data, err := readS3ExportArtifactV1(ctx, objects, ref)
+		if err != nil || len(data) == 0 {
+			return fail("program/authoring asset is missing or invalid: %v", err)
 		}
 	}
 	statementDraftBytes, err := readS3ExportArtifactV1(ctx, objects, evidence.StatementDraftArtifact)
@@ -180,8 +198,15 @@ func loadS3ExportBindingV1(
 	if err != nil || !bytes.Equal(canonicalAudit, auditBytes) || auditSHA != evidence.AuditArtifact.SHA256 {
 		return fail("quality audit is not canonical or CAS-bound")
 	}
-	if err := validateS3ExportAuditPassV1(audit, workflowID, evidence.SubjectRevision); err != nil {
-		return fail("quality audit is not a complete nine-gate PASS: %v", err)
+	if evidence.Policy != audit.Policy {
+		return fail("stored quality policy does not match the original audit")
+	}
+	if evidence.Decision == qualitygate.DecisionPass {
+		if err := validateS3ExportAuditPassV1(audit, workflowID, evidence.SubjectRevision); err != nil {
+			return fail("quality audit is not a complete nine-gate PASS: %v", err)
+		}
+	} else if err := validateS3ExportQuarantineAuditV1(audit, workflowID, evidence.SubjectRevision); err != nil {
+		return fail("original quarantined quality audit is invalid: %v", err)
 	}
 
 	manifestPathBytes, err := objects.DownloadFile(ctx, manifestMetadata.Path)
@@ -212,16 +237,45 @@ func loadS3ExportBindingV1(
 		return fail("persisted testcase binding is invalid: %v", err)
 	}
 	return &s3ExportBindingV1{
-		TestManifestV2:     manifest,
-		TestManifestRef:    evidence.TestManifestArtifact,
-		AuthoringBundleRef: evidence.AuthoringBundleArtifact,
-		QualityAuditV1:     audit,
-		QualityAuditBytes:  append([]byte(nil), auditBytes...),
-		QualityAuditRef:    evidence.AuditArtifact,
-		StatementDraftV1:   &statementDraft,
-		EvidenceLevel:      evidence.EvidenceLevel,
-		SubjectRevision:    evidence.SubjectRevision,
+		TestManifestV2:      manifest,
+		TestManifestRef:     evidence.TestManifestArtifact,
+		AuthoringBundleRef:  evidence.AuthoringBundleArtifact,
+		QualityAuditV1:      audit,
+		QualityAuditBytes:   append([]byte(nil), auditBytes...),
+		QualityAuditRef:     evidence.AuditArtifact,
+		StatementDraftV1:    &statementDraft,
+		EvidenceLevel:       evidence.EvidenceLevel,
+		SubjectRevision:     evidence.SubjectRevision,
+		MainProgramSHA256:   evidence.MainProgramArtifact.SHA256,
+		OracleProgramSHA256: evidence.OracleProgramArtifact.SHA256,
+		HumanApproved:       manualApproved && evidence.Decision == qualitygate.DecisionQuarantine,
 	}, nil
+}
+
+func validateS3ExportQuarantineAuditV1(audit qualitygate.AuditV1, workflowID, revision string) error {
+	_, ruleSHA, err := qualitygate.CanonicalRuleForPolicyV1(audit.Policy)
+	if err != nil {
+		return err
+	}
+	want := []string{qualitygate.GateSpecLint, qualitygate.GateSampleOutputBinding, qualitygate.GateOracleDifferential,
+		qualitygate.GateSanitizer, qualitygate.GateBoundaryCoverage, qualitygate.GateTestManifest,
+		qualitygate.GateReviewerSchemaVerdict, qualitygate.GateDedup, qualitygate.GateHiddenRegression}
+	if audit.RuleSHA256 != ruleSHA || audit.SubjectID != workflowID || audit.SubjectRevision != revision ||
+		audit.Decision != qualitygate.DecisionQuarantine || len(audit.GateResults) != len(want) || len(audit.BlockingIssues) == 0 {
+		return fmt.Errorf("quarantine identity, decision, findings, or gate count is invalid")
+	}
+	failed := false
+	for i, gate := range audit.GateResults {
+		optionalHidden := s3OptionalHiddenGateV1(audit.Policy, gate)
+		if gate.Gate != want[i] || (gate.Status != qualitygate.GateStatusPass && gate.Status != qualitygate.GateStatusBlocked && gate.Status != qualitygate.GateStatusCheckFailed && !optionalHidden) {
+			return fmt.Errorf("gate %d identity or status is invalid", i)
+		}
+		failed = failed || (gate.Status != qualitygate.GateStatusPass && !optionalHidden)
+	}
+	if !failed {
+		return fmt.Errorf("quarantined audit does not retain any failed gate")
+	}
+	return nil
 }
 
 func validateS3ExportProblemStateV1(problem *domain.Problem, metadata map[string]json.RawMessage) error {
@@ -332,7 +386,7 @@ func readS3ExportArtifactV1(ctx context.Context, objects HydroObjectReader, ref 
 }
 
 func validateS3ExportAuditPassV1(audit qualitygate.AuditV1, workflowID, revision string) error {
-	_, canonicalRuleSHA, err := qualitygate.CanonicalRuleV1()
+	_, canonicalRuleSHA, err := qualitygate.CanonicalRuleForPolicyV1(audit.Policy)
 	if err != nil {
 		return err
 	}
@@ -353,11 +407,15 @@ func validateS3ExportAuditPassV1(audit qualitygate.AuditV1, workflowID, revision
 		return fmt.Errorf("audit identity, decision, or gate count is invalid")
 	}
 	for index, gate := range audit.GateResults {
-		if gate.Gate != want[index] || gate.Status != qualitygate.GateStatusPass {
+		if gate.Gate != want[index] || (gate.Status != qualitygate.GateStatusPass && !s3OptionalHiddenGateV1(audit.Policy, gate)) {
 			return fmt.Errorf("gate %d is %q/%q", index, gate.Gate, gate.Status)
 		}
 	}
 	return nil
+}
+
+func s3OptionalHiddenGateV1(policy string, gate qualitygate.GateResultV1) bool {
+	return policy == qualitygate.PolicyProblemSetTraining && gate.Gate == qualitygate.GateHiddenRegression && gate.Status == qualitygate.GateStatusNotConfigured
 }
 
 func validateS3ExportPersistedCasesV1(

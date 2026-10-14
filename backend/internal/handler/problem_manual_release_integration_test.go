@@ -74,3 +74,42 @@ func TestProblemManualReleaseHTTPContractIntegration(t *testing.T) {
 	require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FROM problem_manual_release_approvals WHERE problem_id=$1`, p.ID).Scan(&count))
 	require.Equal(t, 1, count)
 }
+
+func TestProblemIncompleteCandidateCannotApproveHTTPIntegration(t *testing.T) {
+	if os.Getenv("ALGOFORGE_INTEGRATION_DISPOSABLE_DB") != "true" {
+		t.Skip("requires disposable migrated database")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, os.Getenv("DATABASE_URL"))
+	require.NoError(t, err)
+	defer pool.Close()
+	repo := repository.NewProblemRepository(pool)
+	p := &domain.Problem{ID: uuid.New(), Title: "Synthetic incomplete candidate", Statement: "An unfinished statement.", Level: domain.LevelAlgorithm, Difficulty: 1000, Tags: []string{}, TimeLimit: 1000, MemoryLimit: 128, Status: domain.ProblemStatusQuarantined, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(), MetadataJSON: json.RawMessage(`{"generation_candidate":{"complete":false}}`)}
+	require.NoError(t, repo.Create(ctx, p))
+	p, err = repo.GetByID(ctx, p.ID)
+	require.NoError(t, err)
+	h := NewProblemHandler(service.NewProblemService(repo, nil, nil, nil, nil, ""), nil)
+	for _, override := range []bool{false, true} {
+		body, err := json.Marshal(map[string]interface{}{"approved": true, "override_quality": override, "expected_updated_at": p.UpdatedAt})
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/problems/"+p.ID.String()+"/public-release-approval", strings.NewReader(string(body)))
+		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+		res := httptest.NewRecorder()
+		e := echo.New()
+		c := e.NewContext(req, res)
+		c.SetParamNames("id")
+		c.SetParamValues(p.ID.String())
+		c.Set("user", &authmw.JWTClaims{Role: "admin", UserID: "synthetic-admin"})
+		if err := h.HandleApprovePublicRelease(c); err != nil {
+			e.HTTPErrorHandler(err, c)
+		}
+		require.Equal(t, http.StatusConflict, res.Code, res.Body.String())
+		require.Contains(t, res.Body.String(), "补齐测试数据")
+	}
+	var count int
+	require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FROM problem_manual_release_approvals WHERE problem_id=$1`, p.ID).Scan(&count))
+	require.Zero(t, count)
+	current, err := repo.GetByID(ctx, p.ID)
+	require.NoError(t, err)
+	require.Equal(t, domain.ProblemStatusQuarantined, current.Status)
+}

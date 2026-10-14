@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Gingoo-TvT/Qraft/backend/internal/domain"
+	qualitygate "github.com/Gingoo-TvT/Qraft/backend/internal/qualitygate/v1"
 	"github.com/Gingoo-TvT/Qraft/backend/internal/workflow/activities"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -21,6 +22,7 @@ type setWorkflowHarness struct {
 	env                                   *testsuite.TestWorkflowEnvironment
 	mu                                    sync.Mutex
 	statuses                              map[int]string
+	recorded                              map[int]domain.ProblemSetGenerationSlot
 	attached                              map[int]bool
 	programCalls, quizCalls, active, peak int
 	finish                                ProblemSetFinishInput
@@ -30,7 +32,7 @@ type setWorkflowHarness struct {
 func newSetWorkflowHarness(t *testing.T, slots []ProblemSetPreparedSlot) *setWorkflowHarness {
 	t.Helper()
 	suite := &testsuite.WorkflowTestSuite{}
-	h := &setWorkflowHarness{env: suite.NewTestWorkflowEnvironment(), statuses: map[int]string{}, attached: map[int]bool{}}
+	h := &setWorkflowHarness{env: suite.NewTestWorkflowEnvironment(), statuses: map[int]string{}, recorded: map[int]domain.ProblemSetGenerationSlot{}, attached: map[int]bool{}}
 	h.env.RegisterActivityWithOptions(func(context.Context, domain.ProblemSetGenerationRef) (*ProblemSetBatch, error) {
 		return &ProblemSetBatch{Slots: slots}, nil
 	}, activity.RegisterOptions{Name: "PrepareProblemSetBatchActivity"})
@@ -38,6 +40,7 @@ func newSetWorkflowHarness(t *testing.T, slots []ProblemSetPreparedSlot) *setWor
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		h.statuses[in.Slot.Position] = in.Slot.Status
+		h.recorded[in.Slot.Position] = in.Slot
 		return nil
 	}, activity.RegisterOptions{Name: "RecordProblemSetSlotActivity"})
 	h.env.RegisterActivityWithOptions(func(_ context.Context, in ProblemSetSlotInput) error {
@@ -78,6 +81,18 @@ func newSetWorkflowHarness(t *testing.T, slots []ProblemSetPreparedSlot) *setWor
 		}
 		if in.SubjectID == "reject" {
 			return &ProblemGenerationQualityResultV1{Decision: "quarantine", StoredProblemID: uuid.NewString()}, nil
+		}
+		if in.SubjectID == "review" {
+			ref := &activities.ArtifactRef{SHA256: "synthetic-reference"}
+			estimate, delta := 1400, 200
+			return &ProblemGenerationQualityResultV1{
+				Decision: "quarantine", StoredProblemID: uuid.NewString(),
+				Audit: &qualitygate.AuditV1{Decision: "quarantine"}, AuditArtifact: ref,
+				AuthoringBundleArtifact: ref, StatementDraftArtifact: ref, FinalStatementArtifact: ref,
+				MainProgramArtifact: ref, OracleProgramArtifact: ref, OracleReceiptArtifact: ref, TestManifestArtifact: ref,
+				Failure:              &domain.GenerationFailure{Code: "quality_review_required", Message: "合成评审需要确认"},
+				DifficultyAssessment: &domain.GenerationDifficultyAssessment{Target: 1200, Estimated: &estimate, Delta: &delta},
+			}, nil
 		}
 		return &ProblemGenerationQualityResultV1{Decision: "pass", StoredProblemID: uuid.NewString()}, nil
 	}, tw.RegisterOptions{Name: "ProblemGenerationQualityWorkflowV1"})
@@ -128,6 +143,28 @@ func TestProblemSetWorkflowContinuesWithoutRepeatingCompletedBatch(t *testing.T)
 	require.True(t, tw.IsContinueAsNewError(h.env.GetWorkflowError()))
 	require.Len(t, h.attached, 4)
 	require.Empty(t, h.finish.Error)
+}
+
+func TestProblemSetWorkflowKeepsCandidatesAndSeparatesReviewFromRegeneration(t *testing.T) {
+	slots := setWorkflowSlots(3)
+	slots[0].Programming.SubjectID = "reject"
+	slots[1].Slot.Type = domain.QuizTypeProgramming
+	slots[1].Programming.SubjectID = "review"
+	h := newSetWorkflowHarness(t, slots)
+	h.env.ExecuteWorkflow(ProblemSetGenerationWorkflow, domain.ProblemSetGenerationRef{SetID: uuid.New(), RunID: "run"})
+	require.NoError(t, h.env.GetWorkflowError())
+	require.NotNil(t, h.recorded[1].ProblemID, "partial candidate remains available to inspect")
+	require.Equal(t, "failed", h.recorded[1].Status)
+	require.True(t, h.recorded[1].Regenerate, "partial candidate must rerun rather than approve missing assets")
+	require.NotNil(t, h.recorded[2].ProblemID)
+	require.Equal(t, "awaiting_review", h.recorded[2].Status)
+	require.False(t, h.recorded[2].Regenerate)
+	require.Equal(t, "合成评审需要确认", h.recorded[2].Failure.Message)
+	require.Equal(t, 1200, h.recorded[2].DifficultyAssessment.Target)
+	require.Equal(t, 200, *h.recorded[2].DifficultyAssessment.Delta)
+	require.False(t, h.attached[1])
+	require.False(t, h.attached[2])
+	require.True(t, h.attached[3], "other slots must continue despite candidates awaiting review")
 }
 
 func TestProblemSetWorkflowCancelKeepsCompletedItems(t *testing.T) {

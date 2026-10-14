@@ -339,6 +339,7 @@ func main() {
 	w.RegisterActivity(acts.S3RepairRevisionActivityV1)
 	w.RegisterActivity(acts.RecomputeS3VerdictActivityV1)
 	w.RegisterActivity(acts.StoreS3QualityDraftActivityV1)
+	w.RegisterActivity(acts.StoreS3ReviewCandidateActivityV1)
 	w.RegisterActivity(acts.GenerateS5ConceptAttemptActivityV1)
 	w.RegisterActivity(acts.NormalizeS5ConceptPoolActivityV1)
 	w.RegisterActivity(acts.ObserveS5ConceptDedupBatchV1)

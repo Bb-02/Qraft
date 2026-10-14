@@ -136,6 +136,9 @@ var routePermissions = map[string]RoutePermission{
 	"POST /api/v1/rating/problems/:id/calibration":                  PermissionAdmin,
 	"GET /api/v1/rating/problems/:id/decisions":                     PermissionAdmin,
 	"POST /api/v1/rating/problems/:id/decisions":                    PermissionAdmin,
+
+	// Resuming a manually reviewed candidate retains the handler's administrator boundary.
+	"POST /api/v1/problem-sets/:id/generation/slots/:position/resume": PermissionAdmin,
 }
 
 func PermissionForRoute(method, pattern string) (RoutePermission, bool) {

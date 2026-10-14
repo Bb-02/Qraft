@@ -34,27 +34,31 @@ type ProblemGenerationQualityInputV1 struct {
 }
 
 type ProblemGenerationQualityResultV1 struct {
-	PayloadVersion          int                        `json:"payload_version"`
-	Decision                string                     `json:"decision"`
-	StoppedGate             string                     `json:"stopped_gate,omitempty"`
-	SubjectRevision         string                     `json:"subject_revision,omitempty"`
-	ReviewerInvoked         bool                       `json:"reviewer_invoked"`
-	HiddenInvoked           bool                       `json:"hidden_invoked"`
-	RepairInvoked           bool                       `json:"repair_invoked"`
-	RepairRounds            int                        `json:"repair_rounds"`
-	FinalStatementArtifact  *activities.ArtifactRef    `json:"final_statement_artifact,omitempty"`
-	AuthoringBundleArtifact *activities.ArtifactRef    `json:"authoring_bundle_artifact,omitempty"`
-	StatementDraftArtifact  *activities.ArtifactRef    `json:"statement_draft_artifact,omitempty"`
-	MainProgramArtifact     *activities.ArtifactRef    `json:"main_program_artifact,omitempty"`
-	OracleProgramArtifact   *activities.ArtifactRef    `json:"oracle_program_artifact,omitempty"`
-	OracleReceiptArtifact   *activities.ArtifactRef    `json:"oracle_receipt_artifact,omitempty"`
-	TestManifestArtifact    *activities.ArtifactRef    `json:"test_manifest_artifact,omitempty"`
-	Audit                   *qualitygate.AuditV1       `json:"audit,omitempty"`
-	AuditArtifact           *activities.ArtifactRef    `json:"audit_artifact,omitempty"`
-	LastRepairArtifact      *activities.ArtifactRef    `json:"last_repair_artifact,omitempty"`
-	RepairState             *qualitygate.RepairStateV1 `json:"repair_state,omitempty"`
-	StoredProblemID         string                     `json:"stored_problem_id,omitempty"`
-	StoredProblemStatus     domain.ProblemStatus       `json:"stored_problem_status,omitempty"`
+	PayloadVersion          int                                    `json:"payload_version"`
+	Decision                string                                 `json:"decision"`
+	StoppedGate             string                                 `json:"stopped_gate,omitempty"`
+	SubjectRevision         string                                 `json:"subject_revision,omitempty"`
+	ReviewerInvoked         bool                                   `json:"reviewer_invoked"`
+	HiddenInvoked           bool                                   `json:"hidden_invoked"`
+	RepairInvoked           bool                                   `json:"repair_invoked"`
+	RepairRounds            int                                    `json:"repair_rounds"`
+	FinalStatementArtifact  *activities.ArtifactRef                `json:"final_statement_artifact,omitempty"`
+	AuthoringBundleArtifact *activities.ArtifactRef                `json:"authoring_bundle_artifact,omitempty"`
+	StatementDraftArtifact  *activities.ArtifactRef                `json:"statement_draft_artifact,omitempty"`
+	MainProgramArtifact     *activities.ArtifactRef                `json:"main_program_artifact,omitempty"`
+	OracleProgramArtifact   *activities.ArtifactRef                `json:"oracle_program_artifact,omitempty"`
+	OracleReceiptArtifact   *activities.ArtifactRef                `json:"oracle_receipt_artifact,omitempty"`
+	TestManifestArtifact    *activities.ArtifactRef                `json:"test_manifest_artifact,omitempty"`
+	Audit                   *qualitygate.AuditV1                   `json:"audit,omitempty"`
+	AuditArtifact           *activities.ArtifactRef                `json:"audit_artifact,omitempty"`
+	LastRepairArtifact      *activities.ArtifactRef                `json:"last_repair_artifact,omitempty"`
+	RepairState             *qualitygate.RepairStateV1             `json:"repair_state,omitempty"`
+	StoredProblemID         string                                 `json:"stored_problem_id,omitempty"`
+	StoredProblemStatus     domain.ProblemStatus                   `json:"stored_problem_status,omitempty"`
+	Failure                 *domain.GenerationFailure              `json:"failure,omitempty"`
+	CasePlanArtifact        *activities.ArtifactRef                `json:"case_plan_artifact,omitempty"`
+	OutputArtifacts         []*activities.ArtifactRef              `json:"output_artifacts,omitempty"`
+	DifficultyAssessment    *domain.GenerationDifficultyAssessment `json:"difficulty_assessment,omitempty"`
 }
 
 type problemQualityRevisionOutcomeV1 struct {
@@ -73,7 +77,7 @@ type problemQualityRepairAssetV1 struct {
 // side effects. A stable generation-job subject is fail-closed: quarantine is
 // returned as QualityNotMet, while a nine-gate PASS is materialized exactly
 // once as an editable draft by the D-side S4 store activity.
-func ProblemGenerationQualityWorkflowV1(ctx workflow.Context, in ProblemGenerationQualityInputV1) (*ProblemGenerationQualityResultV1, error) {
+func ProblemGenerationQualityWorkflowV1(ctx workflow.Context, in ProblemGenerationQualityInputV1) (returned *ProblemGenerationQualityResultV1, retErr error) {
 	if err := validateProblemQualityInputV1(in); err != nil {
 		return nil, temporal.NewNonRetryableApplicationError(err.Error(), problemQualityContractErrorTypeV1, err)
 	}
@@ -84,6 +88,13 @@ func ProblemGenerationQualityWorkflowV1(ctx workflow.Context, in ProblemGenerati
 		Progress:    1,
 		StartedAt:   &now,
 	}
+	defer func() {
+		if retErr != nil && in.Params.IsProblemSetGeneration() {
+			failure := generationapi.DescribeFailure(retErr)
+			state.MarkFailedAt(failure.Message, workflow.Now(ctx))
+			retErr = temporal.NewNonRetryableApplicationError(failure.Message, failure.Code, retErr, *failure)
+		}
+	}()
 	if err := workflow.SetQueryHandler(ctx, domain.WorkflowStateQueryName, func() (domain.WorkflowStateQuery, error) {
 		return domain.WorkflowStateQuery{State: state}, nil
 	}); err != nil {
@@ -138,7 +149,7 @@ func ProblemGenerationQualityWorkflowV1(ctx workflow.Context, in ProblemGenerati
 		if err := validateAuthoringWorkflowInputV1(authoringInput); err != nil {
 			return nil, temporal.NewNonRetryableApplicationError(err.Error(), problemQualityContractErrorTypeV1, err)
 		}
-		outcome, err := runProblemQualityRevisionV1(ctx, activityCtx, in, authoringInput)
+		outcome, err := runProblemQualityRevisionV1(ctx, activityCtx, in, authoringInput, &state)
 		if err != nil {
 			return nil, err
 		}
@@ -211,7 +222,29 @@ func finalizeProblemQualityProductResultV1(
 	if !generationapi.IsJobID(in.SubjectID) {
 		return result, nil
 	}
-	if result == nil || result.Decision != qualitygate.DecisionPass {
+	if result != nil && result.Decision != qualitygate.DecisionPass && in.Params.IsProblemSetGeneration() {
+		if result.Failure == nil {
+			result.Failure = problemQualityFailureV1(result)
+		}
+		if !problemQualityHasCompleteAssetsV1(result) {
+			var stored activities.StoreS3QualityDraftResultV1
+			input := activities.StoreS3ReviewCandidateInputV1{PayloadVersion: activities.S3QualityPayloadVersionV1, WorkflowID: in.SubjectID, FrozenConcept: in.FrozenConcept, Language: in.Language, Params: in.Params, Failure: result.Failure, AuthoringBundleArtifact: result.AuthoringBundleArtifact, StatementDraftArtifact: result.StatementDraftArtifact, FinalStatementArtifact: result.FinalStatementArtifact, MainProgramArtifact: result.MainProgramArtifact, OracleProgramArtifact: result.OracleProgramArtifact, CasePlanArtifact: result.CasePlanArtifact, OutputArtifacts: result.OutputArtifacts, DifficultyAssessment: result.DifficultyAssessment}
+			if err := workflow.ExecuteActivity(activityCtx, "StoreS3ReviewCandidateActivityV1", input).Get(ctx, &stored); err != nil {
+				return nil, fmt.Errorf("保存待审候选题失败: %w", err)
+			}
+			if stored.ProblemID == "" || stored.Status != domain.ProblemStatusQuarantined {
+				return nil, fmt.Errorf("待审候选题存储结果无效")
+			}
+			result.StoredProblemID, result.StoredProblemStatus = stored.ProblemID, stored.Status
+			if state != nil {
+				state.ProblemID = stored.ProblemID
+				state.Error = result.Failure.Message
+				state.MarkRejectedQuarantinedAt(workflow.Now(ctx))
+			}
+			return result, nil
+		}
+	}
+	if result == nil || (result.Decision != qualitygate.DecisionPass && !in.Params.IsProblemSetGeneration()) {
 		return nil, temporal.NewNonRetryableApplicationError(
 			"candidate did not satisfy all nine quality gates",
 			"QualityNotMet",
@@ -251,6 +284,8 @@ func finalizeProblemQualityProductResultV1(
 		Language:                in.Language,
 		EvidenceLevel:           evidenceLevel,
 		Params:                  in.Params,
+		Failure:                 result.Failure,
+		DifficultyAssessment:    result.DifficultyAssessment,
 		AuthoringBundleArtifact: *result.AuthoringBundleArtifact,
 		StatementDraftArtifact:  *result.StatementDraftArtifact,
 		FinalStatementArtifact:  *result.FinalStatementArtifact,
@@ -263,8 +298,12 @@ func finalizeProblemQualityProductResultV1(
 	if err := workflow.ExecuteActivity(activityCtx, "StoreS3QualityDraftActivityV1", storeInput).Get(ctx, &stored); err != nil {
 		return nil, fmt.Errorf("materialize S3 quality PASS as product draft: %w", err)
 	}
+	wantStatus := domain.ProblemStatusDraft
+	if result.Decision != qualitygate.DecisionPass {
+		wantStatus = domain.ProblemStatusQuarantined
+	}
 	if stored.PayloadVersion != activities.StoreS3QualityDraftPayloadVersionV1 ||
-		stored.ProblemID == "" || stored.Status != domain.ProblemStatusDraft ||
+		stored.ProblemID == "" || stored.Status != wantStatus ||
 		stored.AuditSHA256 != result.AuditArtifact.SHA256 ||
 		stored.TestManifestSHA256 != result.TestManifestArtifact.SHA256 {
 		return nil, temporal.NewNonRetryableApplicationError(
@@ -276,14 +315,37 @@ func finalizeProblemQualityProductResultV1(
 	result.StoredProblemID = stored.ProblemID
 	result.StoredProblemStatus = stored.Status
 	if state != nil {
+		state.ProblemID = stored.ProblemID
 		state.MarkCompletedAt(workflow.Now(ctx))
+		if stored.Status == domain.ProblemStatusQuarantined {
+			state.Error = result.Failure.Message
+			state.MarkRejectedQuarantinedAt(workflow.Now(ctx))
+		}
 	}
 	return result, nil
 }
 
-func runProblemQualityRevisionV1(ctx, activityCtx workflow.Context, root ProblemGenerationQualityInputV1, authoringInput activities.GenerateAuthoringPlanInput) (*problemQualityRevisionOutcomeV1, error) {
+func runProblemQualityRevisionV1(ctx, activityCtx workflow.Context, root ProblemGenerationQualityInputV1, authoringInput activities.GenerateAuthoringPlanInput, state *domain.WorkflowState) (returned *problemQualityRevisionOutcomeV1, retErr error) {
+	candidate := ProblemGenerationQualityResultV1{PayloadVersion: ProblemGenerationQualityPayloadVersionV1}
+	policy := ""
+	targetDifficulty := 0
+	if root.Params.IsProblemSetGeneration() {
+		policy = qualitygate.PolicyProblemSetTraining
+		targetDifficulty = root.Params.Difficulty
+		candidate.DifficultyAssessment = &domain.GenerationDifficultyAssessment{Target: targetDifficulty}
+	}
+	defer func() {
+		if retErr != nil && root.Params.IsProblemSetGeneration() && candidate.AuthoringBundleArtifact != nil && !temporal.IsCanceledError(retErr) && ctx.Err() == nil {
+			candidate.Decision = qualitygate.DecisionQuarantine
+			candidate.Failure = generationapi.DescribeFailure(retErr)
+			returned = &problemQualityRevisionOutcomeV1{result: &candidate, assets: map[string]problemQualityRepairAssetV1{}}
+			retErr = nil
+		}
+	}()
 	quarantine := func(gate, revision string, reviewer, hidden bool, refs ...*activities.ArtifactRef) *problemQualityRevisionOutcomeV1 {
-		result := &ProblemGenerationQualityResultV1{PayloadVersion: ProblemGenerationQualityPayloadVersionV1, Decision: qualitygate.DecisionQuarantine, StoppedGate: gate, SubjectRevision: revision, ReviewerInvoked: reviewer, HiddenInvoked: hidden}
+		copy := candidate
+		result := &copy
+		result.Decision, result.StoppedGate, result.SubjectRevision, result.ReviewerInvoked, result.HiddenInvoked = qualitygate.DecisionQuarantine, gate, revision, reviewer, hidden
 		if len(refs) > 0 {
 			result.FinalStatementArtifact = refs[0]
 		}
@@ -303,8 +365,12 @@ func runProblemQualityRevisionV1(ctx, activityCtx workflow.Context, root Problem
 	if err := validateAuthoringWorkflowResultV1(authoringInput, &authoring); err != nil {
 		return nil, temporal.NewNonRetryableApplicationError(err.Error(), problemQualityContractErrorTypeV1, err)
 	}
+	candidate.AuthoringBundleArtifact = authoring.BundleArtifact
 	if authoring.Decision != activities.AuthoringPlanDecisionAccepted {
-		return quarantine(qualitygate.GateSpecLint, authoring.BundleSHA256, false, false), nil
+		out := quarantine(qualitygate.GateSpecLint, authoring.BundleSHA256, false, false)
+		out.result.Failure = problemQualityFailureV1(out.result)
+		out.result.Failure.TechnicalDetails = authoring.RejectionReason
+		return out, nil
 	}
 	bundleRef := *authoring.BundleArtifact
 	var specLintGate activities.BuildS3SpecLintGateResultV1
@@ -335,6 +401,11 @@ func runProblemQualityRevisionV1(ctx, activityCtx workflow.Context, root Problem
 		return nil, temporal.NewNonRetryableApplicationError(err.Error(), problemQualityContractErrorTypeV1, err)
 	}
 	draftRef := *statement.StatementDraftArtifact
+	candidate.StatementDraftArtifact = &draftRef
+	if state != nil {
+		state.CurrentStep = domain.StepGenerateSolution
+		state.Progress = 30
+	}
 	validateSamplesInput := activities.ValidateAuthoringSampleCandidatesInput{PayloadVersion: activities.ValidateAuthoringSampleCandidatesPayloadVersion, BundleArtifact: bundleRef, ExpectedBundleSHA256: authoring.BundleSHA256, ExpectedAuthoringInputSHA256: authoring.InputSHA256, ExpectedBriefSHA256: authoring.BriefSHA256, ExpectedSemanticSpecSHA256: authoring.SemanticSpecSHA256, ExpectedDifficulty: authoringInput.Params.Difficulty, RequiredKnowledgePoints: append([]string(nil), authoringInput.Params.Tags...), ExpectedSampleCount: authoringInput.Params.TestDataConfig.NumSamples}
 	extractInput := activities.ExtractSemanticSpecArtifactInputV1{PayloadVersion: activities.S3QualityPayloadVersionV1, AuthoringBundleArtifact: bundleRef, ExpectedAuthoringBundleSHA: authoring.BundleSHA256, ExpectedAuthoringInputSHA: authoring.InputSHA256, ExpectedBriefSHA: authoring.BriefSHA256, ExpectedSemanticSpecSHA: authoring.SemanticSpecSHA256}
 
@@ -388,6 +459,7 @@ func runProblemQualityRevisionV1(ctx, activityCtx workflow.Context, root Problem
 		return nil, temporal.NewNonRetryableApplicationError("main solution has no CAS source", problemQualityContractErrorTypeV1, nil)
 	}
 	mainRef := *main.CandidateSourceArtifact
+	candidate.MainProgramArtifact = &mainRef
 	var oracle activities.GenerateOracleCandidateResultV1
 	if err := oracleFuture.Get(ctx, &oracle); err != nil {
 		return nil, fmt.Errorf("generate independent S3 oracle: %w", err)
@@ -399,11 +471,20 @@ func runProblemQualityRevisionV1(ctx, activityCtx workflow.Context, root Problem
 	if casePlan.CasePlanArtifact == nil || casePlan.TestCount == 0 {
 		return nil, temporal.NewNonRetryableApplicationError("case-plan activity returned no cases", problemQualityContractErrorTypeV1, nil)
 	}
+	candidate.CasePlanArtifact = casePlan.CasePlanArtifact
+	candidate.OracleProgramArtifact = oracle.CandidateSourceArtifact
+	if state != nil {
+		state.CurrentStep = domain.StepRunSandbox
+		state.Progress = 55
+	}
 	casePlanRef := *casePlan.CasePlanArtifact
 	limits := activities.ExecutionLimits{TimeLimitMs: authoringInput.Params.TimeLimit, MemoryLimitMB: authoringInput.Params.MemoryLimit}
 	var oracleGate activities.S3OracleGateResultV1
 	if err := workflow.ExecuteActivity(activityCtx, "VerifyProgramAgainstIndependentOracleActivityV1", activities.S3OracleGateInputV1{PayloadVersion: activities.S3QualityPayloadVersionV1, ExpectedSemanticSpecSHA256: authoring.SemanticSpecSHA256, MainCandidate: main, OracleCandidate: oracle, CasePlanArtifact: casePlanRef, Limits: limits}).Get(ctx, &oracleGate); err != nil {
 		return nil, fmt.Errorf("verify main against independent oracle: %w", err)
+	}
+	if oracleGate.MainRun != nil {
+		candidate.OutputArtifacts = oracleGate.MainRun.OutputArtifacts
 	}
 	baseAssets := map[string]problemQualityRepairAssetV1{}
 	addProblemQualityAssetV1(baseAssets, "semantic_spec", semanticRef)
@@ -417,6 +498,7 @@ func runProblemQualityRevisionV1(ctx, activityCtx workflow.Context, root Problem
 	oracleRef := *oracle.CandidateSourceArtifact
 	verifiedRef := *oracleGate.VerifiedProgramReceiptArtifact
 	oracleReceiptRef := *oracleGate.ReceiptArtifact
+	candidate.OracleReceiptArtifact = &oracleReceiptRef
 	addProblemQualityAssetV1(baseAssets, "oracle_promotion", oracleReceiptRef)
 	var hiddenResolution activities.ResolveS3HiddenSuiteResultV1
 	if err := workflow.ExecuteActivity(activityCtx, "ResolveS3HiddenSuiteActivityV1", activities.ResolveS3HiddenSuiteInputV1{PayloadVersion: activities.S3QualityPayloadVersionV1, SubjectID: root.SubjectID, SemanticSpecSHA256: authoring.SemanticSpecSHA256}).Get(ctx, &hiddenResolution); err != nil {
@@ -451,6 +533,7 @@ func runProblemQualityRevisionV1(ctx, activityCtx workflow.Context, root Problem
 		return nil, temporal.NewNonRetryableApplicationError("sample finalizer returned no CAS bundle", problemQualityContractErrorTypeV1, nil)
 	}
 	finalRef := *finalStatement.FinalBundleArtifact
+	candidate.FinalStatementArtifact = &finalRef
 	addProblemQualityAssetV1(baseAssets, "final_statement", finalRef)
 	var sampleOutputGate activities.BuildS3SampleOutputGateResultV1
 	sampleOutputInput := activities.BuildS3SampleOutputGateInputV1{
@@ -492,6 +575,7 @@ func runProblemQualityRevisionV1(ctx, activityCtx workflow.Context, root Problem
 		return nil, temporal.NewNonRetryableApplicationError("manifest builder returned incomplete CAS evidence", problemQualityContractErrorTypeV1, nil)
 	}
 	manifestRef := *manifest.TestManifestArtifact
+	candidate.TestManifestArtifact = &manifestRef
 	boundaryRef := *manifest.BoundaryReceiptArtifact
 	addProblemQualityAssetV1(baseAssets, "test_manifest", manifestRef)
 	addProblemQualityAssetV1(baseAssets, "boundary_coverage", boundaryRef)
@@ -505,7 +589,7 @@ func runProblemQualityRevisionV1(ctx, activityCtx workflow.Context, root Problem
 	if err != nil {
 		return nil, temporal.NewNonRetryableApplicationError(fmt.Sprintf("validate S3 pre-review evidence: %v", err), problemQualityContractErrorTypeV1, err)
 	}
-	if !shouldReview {
+	if !shouldReview && !root.Params.IsProblemSetGeneration() {
 		out := quarantine(qualitygate.GateDedup, finalStatement.FinalBundleSHA256, false, false, &finalRef, &mainRef, &manifestRef)
 		out.assets = baseAssets
 		out.blockers = append([]qualitygate.ReviewBlockerV1(nil), dedup.Gate.Blockers...)
@@ -514,32 +598,45 @@ func runProblemQualityRevisionV1(ctx, activityCtx workflow.Context, root Problem
 
 	visible := []activities.S3ReviewerAssetV1{{Role: "semantic_spec", Artifact: semanticRef, ExpectedSHA256: semanticRef.SHA256}, {Role: "final_statement", Artifact: finalRef, ExpectedSHA256: finalRef.SHA256}, {Role: "oracle_promotion", Artifact: oracleReceiptRef, ExpectedSHA256: oracleReceiptRef.SHA256}, {Role: "sanitizer", Artifact: *sanitizer.ReceiptArtifact, ExpectedSHA256: sanitizer.ReceiptSHA256}, {Role: "boundary_coverage", Artifact: boundaryRef, ExpectedSHA256: boundaryRef.SHA256}}
 	var reviewer activities.S3StrictReviewerResultV1
-	if err := workflow.ExecuteActivity(activityCtx, "S3StrictReviewerActivityV1", activities.S3StrictReviewerInputV1{PayloadVersion: activities.S3QualityPayloadVersionV1, SubjectID: root.SubjectID, SubjectRevision: finalStatement.FinalBundleSHA256, TestManifestArtifact: manifestRef, VisibleAssets: visible, ReviewRuntime: copyProblemQualityRuntimeV1(authoringInput.Params.ProviderConfig, "review")}).Get(ctx, &reviewer); err != nil {
+	if state != nil {
+		state.CurrentStep = domain.StepLLMReview
+		state.Progress = 80
+	}
+	if err := workflow.ExecuteActivity(activityCtx, "S3StrictReviewerActivityV1", activities.S3StrictReviewerInputV1{PayloadVersion: activities.S3QualityPayloadVersionV1, SubjectID: root.SubjectID, SubjectRevision: finalStatement.FinalBundleSHA256, TestManifestArtifact: manifestRef, VisibleAssets: visible, ReviewRuntime: copyProblemQualityRuntimeV1(authoringInput.Params.ProviderConfig, "review"), TargetDifficulty: targetDifficulty}).Get(ctx, &reviewer); err != nil {
 		return nil, fmt.Errorf("run strict S3 reviewer: %w", err)
 	}
-	if !problemQualityReviewerPassV1(reviewer.Reviewer.Assessment) {
+	if candidate.DifficultyAssessment != nil {
+		candidate.DifficultyAssessment.Estimated = reviewer.Reviewer.Assessment.EstimatedDifficulty
+		candidate.DifficultyAssessment.Explanation = reviewer.Reviewer.Assessment.DifficultyExplanation
+		if estimated := reviewer.Reviewer.Assessment.EstimatedDifficulty; estimated != nil {
+			delta := *estimated - targetDifficulty
+			candidate.DifficultyAssessment.Delta = &delta
+		}
+	}
+	if !problemQualityReviewerPassV1(reviewer.Reviewer.Assessment) && !root.Params.IsProblemSetGeneration() {
 		out := quarantine(qualitygate.GateReviewerSchemaVerdict, finalStatement.FinalBundleSHA256, true, false, &finalRef, &mainRef, &manifestRef)
 		out.assets, out.blockers = baseAssets, append([]qualitygate.ReviewBlockerV1(nil), reviewer.Reviewer.Assessment.Blockers...)
 		return out, nil
 	}
 
 	var hidden activities.S3HiddenGateResultV1
-	if err := workflow.ExecuteActivity(activityCtx, "S3HiddenRegressionActivityV1", activities.S3HiddenGateInputV1{PayloadVersion: activities.S3QualityPayloadVersionV1, Resolution: hiddenResolution, CandidateArtifact: mainRef}).Get(ctx, &hidden); err != nil {
+	if err := workflow.ExecuteActivity(activityCtx, "S3HiddenRegressionActivityV1", activities.S3HiddenGateInputV1{PayloadVersion: activities.S3QualityPayloadVersionV1, Resolution: hiddenResolution, CandidateArtifact: mainRef, Policy: policy}).Get(ctx, &hidden); err != nil {
 		return nil, fmt.Errorf("run opaque S3 hidden regression: %w", err)
 	}
 	evidence := qualitygate.S3EvidenceV1{SchemaVersion: qualitygate.S3EvidenceSchemaVersionV1, SubjectID: root.SubjectID, SubjectRevision: finalStatement.FinalBundleSHA256, SpecLint: specLintGate.Gate, SampleOutputBinding: sampleOutputGate.Gate, OracleDifferential: oracleGate.Gate, Sanitizer: sanitizer.Gate, BoundaryCoverage: manifest.BoundaryCoverageGate, TestManifest: manifest.TestManifestGate, Reviewer: reviewer.Reviewer, Dedup: dedup.Gate, HiddenRegression: hidden.Gate}
 	var verdict activities.S3VerdictResultV1
-	if err := workflow.ExecuteActivity(activityCtx, "RecomputeS3VerdictActivityV1", activities.S3VerdictInputV1{PayloadVersion: activities.S3QualityPayloadVersionV1, Evidence: evidence}).Get(ctx, &verdict); err != nil {
+	if err := workflow.ExecuteActivity(activityCtx, "RecomputeS3VerdictActivityV1", activities.S3VerdictInputV1{PayloadVersion: activities.S3QualityPayloadVersionV1, Evidence: evidence, Policy: policy}).Get(ctx, &verdict); err != nil {
 		return nil, fmt.Errorf("server-recompute S3 verdict: %w", err)
 	}
 	result := &ProblemGenerationQualityResultV1{
 		PayloadVersion: ProblemGenerationQualityPayloadVersionV1,
 		Decision:       verdict.Audit.Decision, SubjectRevision: finalStatement.FinalBundleSHA256,
-		ReviewerInvoked: true, HiddenInvoked: true,
+		ReviewerInvoked: true, HiddenInvoked: hidden.Gate.Status != qualitygate.GateStatusNotConfigured,
 		AuthoringBundleArtifact: &bundleRef, StatementDraftArtifact: &draftRef,
 		FinalStatementArtifact: &finalRef, MainProgramArtifact: &mainRef,
 		OracleProgramArtifact: &oracleRef, OracleReceiptArtifact: &oracleReceiptRef,
 		TestManifestArtifact: &manifestRef, Audit: &verdict.Audit, AuditArtifact: verdict.AuditArtifact,
+		DifficultyAssessment: candidate.DifficultyAssessment,
 	}
 	if verdict.Audit.Decision != qualitygate.DecisionPass {
 		result.StoppedGate = firstProblemQualityFailedGateV1(verdict.Audit)

@@ -266,15 +266,19 @@ func (s *ProblemSetGenerationService) FinishProblemSetGenerationActivity(ctx con
 		if in.Error != "" {
 			state.Status = "failed"
 			state.Error = boundedSetError(in.Error)
+			state.Failure = in.Failure
 			return nil
 		}
-		failed := 0
+		failed, awaitingReview := 0, 0
 		for _, slot := range state.Slots {
 			if slot.Status == "pending" {
 				more = true
 			}
 			if slot.Status != "succeeded" {
 				failed++
+			}
+			if slot.Status == "awaiting_review" {
+				awaitingReview++
 			}
 		}
 		if more {
@@ -283,9 +287,13 @@ func (s *ProblemSetGenerationService) FinishProblemSetGenerationActivity(ctx con
 		}
 		state.Status = "completed"
 		state.Error = ""
+		state.Failure = nil
 		if failed > 0 {
 			state.Status = "partial"
 			state.Error = fmt.Sprintf("%d 道题未完成，可重试这些题目", failed)
+			if awaitingReview > 0 {
+				state.Error = fmt.Sprintf("%d 道题等待人工审核，%d 道题需要重试；已经完成的题目保留", awaitingReview, failed-awaitingReview)
+			}
 		}
 		return nil
 	})

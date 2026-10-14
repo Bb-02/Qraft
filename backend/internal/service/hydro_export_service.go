@@ -173,6 +173,9 @@ func (s *HydroExportService) BuildProblemPackage(ctx context.Context, problemID 
 	if err != nil {
 		return nil, err
 	}
+	if err := ensureCompleteGenerationCandidate(problem); err != nil {
+		return nil, err
+	}
 	testCases, err := s.problems.GetTestCases(ctx, problemID)
 	if err != nil {
 		return nil, err
@@ -183,7 +186,7 @@ func (s *HydroExportService) BuildProblemPackage(ctx context.Context, problemID 
 			return nil, err
 		}
 	} else {
-		binding, err := loadS3ExportBindingV1(ctx, problem, testCases, s.objects)
+		binding, err := loadProductS3ExportBindingV1(ctx, s.problems, problem, testCases, s.objects)
 		if err != nil {
 			return nil, err
 		}
@@ -219,6 +222,10 @@ func (s *HydroExportService) BuildBatchPackage(ctx context.Context, problemIDs [
 			_ = zw.Close()
 			return nil, err
 		}
+		if err := ensureCompleteGenerationCandidate(problem); err != nil {
+			_ = zw.Close()
+			return nil, err
+		}
 		testCases, err := s.problems.GetTestCases(ctx, problemID)
 		if err != nil {
 			_ = zw.Close()
@@ -231,7 +238,7 @@ func (s *HydroExportService) BuildBatchPackage(ctx context.Context, problemIDs [
 				return nil, err
 			}
 		} else {
-			binding, err := loadS3ExportBindingV1(ctx, problem, testCases, s.objects)
+			binding, err := loadProductS3ExportBindingV1(ctx, s.problems, problem, testCases, s.objects)
 			if err != nil {
 				_ = zw.Close()
 				return nil, err

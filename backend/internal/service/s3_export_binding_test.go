@@ -427,6 +427,9 @@ func qg15AS3ExportFixture(t *testing.T) *qg15AS3ExportFixtureV1 {
 	}
 	reader.data[auditRef.Key] = auditBytes
 	reader.data[refs["authoring"].Key] = authoringBytes
+	reader.data[refs["main"].Key] = []byte("main source")
+	reader.data[refs["oracle"].Key] = []byte("oracle source")
+	reader.data[refs["receipt"].Key] = []byte("oracle receipt")
 	reader.data[refs["draft"].Key] = draftBytes
 	reader.data[refs["final"].Key] = finalBytes
 	reader.data[manifestRef.Key] = manifestBytes

@@ -1390,6 +1390,7 @@ type S3StrictReviewerInputV1 struct {
 	TestManifestArtifact ArtifactRef              `json:"test_manifest_artifact"`
 	VisibleAssets        []S3ReviewerAssetV1      `json:"visible_assets"`
 	ReviewRuntime        *domain.LLMRuntimeConfig `json:"review_runtime,omitempty"`
+	TargetDifficulty     int                      `json:"target_difficulty,omitempty"`
 }
 
 type S3StrictReviewerResultV1 struct {
@@ -1402,6 +1403,11 @@ type S3StrictReviewerResultV1 struct {
 func (a *Activities) S3StrictReviewerActivityV1(ctx context.Context, in S3StrictReviewerInputV1) (*S3StrictReviewerResultV1, error) {
 	if in.PayloadVersion != S3QualityPayloadVersionV1 || strings.TrimSpace(in.SubjectID) == "" || !isManifestSHA256(in.SubjectRevision) {
 		return nil, s3ContractErrorV1("invalid strict reviewer identity")
+	}
+	if in.TargetDifficulty != 0 {
+		if err := domain.ValidateTrainingDifficulty(in.TargetDifficulty); err != nil {
+			return nil, s3ContractErrorV1("invalid reviewer training target: %v", err)
+		}
 	}
 	manifestBytes, err := a.readS3ArtifactV1(ctx, in.TestManifestArtifact, in.TestManifestArtifact.SHA256, "application/json", maxS3ManifestBytesV1)
 	if err != nil {
@@ -1447,17 +1453,21 @@ func (a *Activities) S3StrictReviewerActivityV1(ctx context.Context, in S3Strict
 		}
 	}
 	promptPayload := struct {
-		SubjectID       string          `json:"subject_id"`
-		SubjectRevision string          `json:"subject_revision"`
-		TestManifest    json.RawMessage `json:"test_manifest"`
-		VisibleAssets   interface{}     `json:"visible_assets"`
-	}{in.SubjectID, in.SubjectRevision, json.RawMessage(manifestBytes), visible}
+		SubjectID        string          `json:"subject_id"`
+		SubjectRevision  string          `json:"subject_revision"`
+		TestManifest     json.RawMessage `json:"test_manifest"`
+		VisibleAssets    interface{}     `json:"visible_assets"`
+		TargetDifficulty int             `json:"target_difficulty,omitempty"`
+	}{in.SubjectID, in.SubjectRevision, json.RawMessage(manifestBytes), visible, in.TargetDifficulty}
 	prompt, err := json.Marshal(promptPayload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal strict reviewer prompt: %w", err)
 	}
 	temperature := 0.0
 	req := &llm.Request{MaxTokens: 8192, System: s3StrictReviewerSystemPromptV1, Temperature: &temperature, Messages: []llm.Message{{Role: "user", Content: string(prompt)}}}
+	if in.TargetDifficulty > 0 {
+		req.System += s3TrainingReviewerGuidanceV1
+	}
 	if in.ReviewRuntime != nil {
 		copyRuntime := *in.ReviewRuntime
 		if err := copyRuntime.Validate("review_runtime"); err != nil {
@@ -1473,7 +1483,11 @@ func (a *Activities) S3StrictReviewerActivityV1(ctx context.Context, in S3Strict
 	if response == nil || providerArtifact == nil || providerArtifact.LLMCallReceipt == nil || response.StopReason == "max_tokens" {
 		return nil, s3ContractErrorV1("strict reviewer provider response is missing identity or truncated")
 	}
-	assessment, err := qualitygate.DecodeReviewAssessmentV1([]byte(strings.TrimSpace(response.Text())))
+	assessmentBytes := []byte(strings.TrimSpace(response.Text()))
+	assessment, err := qualitygate.DecodeReviewAssessmentV1(assessmentBytes)
+	if in.TargetDifficulty > 0 {
+		assessment, err = qualitygate.DecodeTrainingReviewAssessmentV1(assessmentBytes)
+	}
 	if err != nil {
 		return nil, s3ContractErrorV1("strict reviewer response: %v", err)
 	}
@@ -1499,6 +1513,11 @@ For test coverage, check whether every declared wrong-solution family and every 
 Only report a blocker when it is grounded in a supplied asset or manifest entry. Each blocker must name code, responsible_asset, and a bounded witness object {runner,fixture_ref,assertion}; responsible_asset must exactly equal the artifact_ref of one supplied visible asset. Never invent or rewrite a reference.
 Return exactly one JSON object matching algoforge.quality-review-assessment.v1 with approved, five required dimensions (clarity, correctness, test_coverage, difficulty_calibration, tag_accuracy), and an explicit blockers array. Do not emit Markdown, extra fields, duplicate keys, comments, or trailing data. The server recomputes the verdict; approved is advisory only.`
 
+const s3TrainingReviewerGuidanceV1 = `
+
+Problem-set training policy: target_difficulty is an author-requested training target, not a formal CF rating. Respect introductory syntax, arithmetic, direct simulation, enumeration and standard algorithm exercises; do not demand extra tricks or originality solely to raise difficulty. Estimate the easiest valid solution's reasoning and implementation burden honestly, using the actual task and constraints. Add estimated_difficulty (an integer from 1 to 10000, no 100-point rounding requirement) and difficulty_explanation (a concise explanation, in the statement's language). An inability to estimate is not a correctness defect.
+Keep all five dimension scores and notes honest. A difficulty mismatch is advisory: record it in difficulty_calibration notes and the estimate, never as a blocker and never lower clarity, correctness, test_coverage or tag_accuracy solely because the task is easier or harder than requested. Preserve real ambiguity, incorrect answers and incomplete coverage as blockers. The server handles target/estimate differences without repeating generation solely to match a subjective score.`
+
 type HiddenSuiteRefV1 struct {
 	SchemaVersion  string `json:"schema_version"`
 	SuiteID        string `json:"suite_id"`
@@ -1522,6 +1541,7 @@ type ResolveS3HiddenSuiteResultV1 struct {
 	Available      bool              `json:"available"`
 	Suite          *HiddenSuiteRefV1 `json:"suite,omitempty"`
 	FailureCode    string            `json:"failure_code,omitempty"`
+	NotConfigured  bool              `json:"not_configured,omitempty"`
 }
 
 // ResolveS3HiddenSuiteActivityV1 keeps suite selection server-owned. Missing
@@ -1533,6 +1553,7 @@ func (a *Activities) ResolveS3HiddenSuiteActivityV1(ctx context.Context, in Reso
 	}
 	unavailable := &ResolveS3HiddenSuiteResultV1{PayloadVersion: S3QualityPayloadVersionV1, Available: false, FailureCode: "hidden.suite_unavailable"}
 	if a == nil || a.deps == nil || a.deps.HiddenSuiteResolver == nil {
+		unavailable.NotConfigured = true
 		return unavailable, nil
 	}
 	suite, err := a.deps.HiddenSuiteResolver.ResolveHiddenSuiteV1(ctx, HiddenSuiteResolutionRequestV1{SchemaVersion: S3HiddenSuiteSchemaV1, SubjectID: in.SubjectID, SemanticSpecSHA256: in.SemanticSpecSHA256})
@@ -1563,6 +1584,7 @@ type S3HiddenGateInputV1 struct {
 	PayloadVersion    int                          `json:"payload_version"`
 	Resolution        ResolveS3HiddenSuiteResultV1 `json:"resolution"`
 	CandidateArtifact ArtifactRef                  `json:"candidate_artifact"`
+	Policy            string                       `json:"policy,omitempty"`
 }
 
 type S3HiddenGateResultV1 struct {
@@ -1573,6 +1595,9 @@ type S3HiddenGateResultV1 struct {
 }
 
 func (a *Activities) S3HiddenRegressionActivityV1(ctx context.Context, in S3HiddenGateInputV1) (*S3HiddenGateResultV1, error) {
+	if err := qualitygate.ValidatePolicyV1(in.Policy); err != nil {
+		return nil, s3ContractErrorV1("invalid hidden gate policy: %v", err)
+	}
 	if in.PayloadVersion != S3QualityPayloadVersionV1 || in.Resolution.PayloadVersion != S3QualityPayloadVersionV1 {
 		return nil, s3ContractErrorV1("invalid hidden-suite resolution")
 	}
@@ -1583,7 +1608,7 @@ func (a *Activities) S3HiddenRegressionActivityV1(ctx context.Context, in S3Hidd
 	status := qualitygate.GateStatusCheckFailed
 	var suite HiddenSuiteRefV1
 	if in.Resolution.Available {
-		if in.Resolution.Suite == nil || in.Resolution.FailureCode != "" {
+		if in.Resolution.Suite == nil || in.Resolution.FailureCode != "" || in.Resolution.NotConfigured {
 			return nil, s3ContractErrorV1("available hidden-suite resolution is incomplete")
 		}
 		suite = *in.Resolution.Suite
@@ -1608,13 +1633,17 @@ func (a *Activities) S3HiddenRegressionActivityV1(ctx context.Context, in S3Hidd
 	} else if in.Resolution.Suite != nil || in.Resolution.FailureCode != "hidden.suite_unavailable" {
 		return nil, s3ContractErrorV1("unavailable hidden-suite resolution is not minimal")
 	}
+	if !in.Resolution.Available && in.Resolution.NotConfigured && in.Policy == qualitygate.PolicyProblemSetTraining {
+		status = qualitygate.GateStatusNotConfigured
+	}
 	receipt := struct {
 		SchemaVersion    string                              `json:"schema_version"`
 		SuiteID          string                              `json:"suite_id,omitempty"`
 		SuiteRevisionSHA string                              `json:"suite_revision_sha256"`
 		CandidateSHA256  string                              `json:"candidate_sha256"`
 		Response         HiddenRegressionExecutionResponseV1 `json:"response"`
-	}{S3HiddenReceiptSchemaV1, suite.SuiteID, suite.RevisionSHA256, in.CandidateArtifact.SHA256, response}
+		NotConfigured    bool                                `json:"not_configured,omitempty"`
+	}{S3HiddenReceiptSchemaV1, suite.SuiteID, suite.RevisionSHA256, in.CandidateArtifact.SHA256, response, status == qualitygate.GateStatusNotConfigured}
 	encoded, err := json.Marshal(receipt)
 	if err != nil {
 		return nil, fmt.Errorf("marshal hidden receipt: %w", err)
@@ -1776,6 +1805,7 @@ const s3RepairRevisionSystemPromptV1 = `You are the isolated AlgoForge R repair 
 type S3VerdictInputV1 struct {
 	PayloadVersion int                      `json:"payload_version"`
 	Evidence       qualitygate.S3EvidenceV1 `json:"evidence"`
+	Policy         string                   `json:"policy,omitempty"`
 }
 
 type S3VerdictResultV1 struct {
@@ -1789,6 +1819,10 @@ func (a *Activities) RecomputeS3VerdictActivityV1(ctx context.Context, in S3Verd
 	if in.PayloadVersion != S3QualityPayloadVersionV1 {
 		return nil, s3ContractErrorV1("unsupported verdict payload version %d", in.PayloadVersion)
 	}
+	if err := qualitygate.ValidatePolicyV1(in.Policy); err != nil || (in.Evidence.Policy != "" && in.Evidence.Policy != in.Policy) {
+		return nil, s3ContractErrorV1("verdict policy is invalid or differs from the server-owned policy")
+	}
+	in.Evidence.Policy = in.Policy
 	auditValue, err := qualitygate.RecomputeVerdictV1(in.Evidence)
 	if err != nil {
 		return nil, s3ContractErrorV1("recompute S3 verdict: %v", err)

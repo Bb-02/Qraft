@@ -47,6 +47,9 @@ func (s *HydroExportService) loadTestingProblem(ctx context.Context, id uuid.UUI
 	if p == nil || p.ID != id || id == uuid.Nil {
 		return nil, fmt.Errorf("%w: 题目身份不完整", ErrConflict)
 	}
+	if err := ensureCompleteGenerationCandidate(p); err != nil {
+		return nil, err
+	}
 	if p.Status != domain.ProblemStatusDraft && p.Status != domain.ProblemStatusReview && p.Status != domain.ProblemStatusPublished {
 		return nil, fmt.Errorf("%w: 当前题目状态 %s 不可导出测试数据", ErrConflict, p.Status)
 	}
@@ -132,7 +135,7 @@ func (s *HydroExportService) loadTestingProblem(ctx context.Context, id uuid.UUI
 		}
 		assets.validation = testingValidation{Schema: manifest.SchemaVersion, SHA256: ref.SHA256, TestCount: manifest.TestCount, DifferentialCheckedCount: manifest.DifferentialCheckedCount}
 	case activities.TestManifestSchemaVersionV2:
-		binding, err := loadS3ExportBindingV1(ctx, p, tests, snapshot)
+		binding, err := loadProductS3ExportBindingV1(ctx, s.problems, p, tests, snapshot)
 		if err != nil {
 			return nil, err
 		}

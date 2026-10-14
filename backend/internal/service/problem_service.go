@@ -369,6 +369,13 @@ func (s *ProblemService) ApprovePublicRelease(
 	if input.OverrideQuality && (input.ExpectedUpdatedAt.IsZero() || len([]rune(input.Note)) > 2000) {
 		return repository.PublicReleaseApprovalReport{}, fmt.Errorf("validation: expected_updated_at is required and note must not exceed 2000 characters")
 	}
+	problem, getErr := s.GetProblem(ctx, id)
+	if getErr != nil {
+		return repository.PublicReleaseApprovalReport{}, getErr
+	}
+	if err := ensureCompleteGenerationCandidate(problem); err != nil {
+		return repository.PublicReleaseApprovalReport{}, err
+	}
 	var report repository.PublicReleaseApprovalReport
 	var err error
 	if input.OverrideQuality {

@@ -31,6 +31,7 @@ const (
 	LayerPublicationReady = "publication_ready"
 
 	LayerStatusPass                    = "pass"
+	LayerStatusQuarantined             = "quarantined"
 	LayerStatusReady                   = "ready"
 	LayerStatusPendingExplicitApproval = "pending_explicit_approval"
 
@@ -61,6 +62,10 @@ type ProblemQualityReportV1 struct {
 	SubjectRevision           string                `json:"subject_revision"`
 	GenerationEvidenceProfile string                `json:"generation_evidence_profile"`
 	Decision                  string                `json:"decision"`
+	Policy                    string                `json:"policy,omitempty"`
+	HumanApproved             bool                  `json:"human_approved,omitempty"`
+	Warnings                  []QualityFindingV1    `json:"warnings,omitempty"`
+	BlockingIssues            []QualityFindingV1    `json:"blocking_issues,omitempty"`
 	Evidence                  QualityEvidenceV1     `json:"evidence"`
 	Gates                     []QualityGateV1       `json:"gates"`
 	Layers                    []QualityLayerV1      `json:"layers"`
@@ -88,6 +93,20 @@ type EvidenceBindingV1 struct {
 type QualityGateV1 struct {
 	Name   string `json:"name"`
 	Status string `json:"status"`
+}
+
+type QualityFindingV1 struct {
+	Source           string           `json:"source"`
+	Gate             string           `json:"gate"`
+	Code             string           `json:"code"`
+	ResponsibleAsset string           `json:"responsible_asset"`
+	Witness          QualityWitnessV1 `json:"witness"`
+}
+
+type QualityWitnessV1 struct {
+	Runner     string `json:"runner"`
+	FixtureRef string `json:"fixture_ref"`
+	Assertion  string `json:"assertion"`
 }
 
 type QualityLayerV1 struct {
@@ -245,8 +264,17 @@ func (report ProblemQualityReportV1) Validate() error {
 	if report.GenerationEvidenceProfile != "minimal" && report.GenerationEvidenceProfile != "standard" && report.GenerationEvidenceProfile != "audit" {
 		return fmt.Errorf("unsupported generation evidence profile %q", report.GenerationEvidenceProfile)
 	}
-	if report.Decision != "pass" {
-		return errors.New("quality report requires a pass decision")
+	if report.Policy != "" && report.Policy != "problem_set_training" {
+		return errors.New("quality report policy is unsupported")
+	}
+	if report.Decision != "pass" && report.Decision != "quarantine" {
+		return errors.New("quality report decision is unsupported")
+	}
+	if report.Decision == "quarantine" && !report.HumanApproved {
+		return errors.New("exportable quarantined report requires a current human approval")
+	}
+	if report.Decision == "pass" && report.HumanApproved {
+		return errors.New("automatic pass must not claim a human quality override")
 	}
 	if err := validateEvidenceV1(report); err != nil {
 		return err
@@ -254,9 +282,24 @@ func (report ProblemQualityReportV1) Validate() error {
 	if len(report.Gates) != len(gateOrderV1) {
 		return fmt.Errorf("quality report has %d gates, want %d", len(report.Gates), len(gateOrderV1))
 	}
+	failed := false
 	for index, gate := range report.Gates {
-		if gate.Name != gateOrderV1[index] || gate.Status != "pass" {
+		optionalHidden := report.Policy == "problem_set_training" && gate.Name == "hidden_regression" && gate.Status == "not_configured"
+		allowed := gate.Status == "pass" || optionalHidden || (report.Decision == "quarantine" && (gate.Status == "blocked" || gate.Status == "check_failed"))
+		if gate.Name != gateOrderV1[index] || !allowed {
 			return fmt.Errorf("quality gate %d is %q/%q", index, gate.Name, gate.Status)
+		}
+		failed = failed || gate.Status == "blocked" || gate.Status == "check_failed"
+	}
+	if (report.Decision == "quarantine") != failed || (report.Decision == "quarantine") != (len(report.BlockingIssues) > 0) {
+		return errors.New("quality report must retain the original failed gates and findings")
+	}
+	if len(report.Warnings) > 0 && report.Policy != "problem_set_training" {
+		return errors.New("advisory warnings require the training policy")
+	}
+	for _, finding := range append(append([]QualityFindingV1(nil), report.Warnings...), report.BlockingIssues...) {
+		if finding.Code == "" || !slices.Contains(gateOrderV1, finding.Gate) || (finding.Source != "reviewer" && finding.Source != "deterministic") {
+			return errors.New("quality finding identity is invalid")
 		}
 	}
 	if err := validateLayersV1(report); err != nil {
@@ -276,7 +319,8 @@ func (report ProblemQualityReportV1) Validate() error {
 	if err != nil || wantStructural != report.StructuralSignature {
 		return errors.New("structural signature is not canonical")
 	}
-	if report.Difficulty.GenerationTarget <= 0 || report.Difficulty.GenerationTarget%100 != 0 || report.Difficulty.Calibrated || report.Difficulty.Source != "cas_bound_authoring_plan_generation_target_advisory" {
+	training := report.Policy == "problem_set_training"
+	if report.Difficulty.GenerationTarget <= 0 || (training && report.Difficulty.GenerationTarget > 10000) || (!training && report.Difficulty.GenerationTarget%100 != 0) || report.Difficulty.Calibrated || report.Difficulty.Source != "cas_bound_authoring_plan_generation_target_advisory" {
 		return errors.New("difficulty must remain an uncalibrated CAS-bound generation-target advisory")
 	}
 	if report.Cost.Status != CostStatusUnavailable || report.Cost.Source != "not_recomputable_from_persisted_s3_evidence" {
@@ -312,12 +356,16 @@ func validateLayersV1(report ProblemQualityReportV1) error {
 	if len(report.Layers) != 3 {
 		return errors.New("quality report requires exactly three ordered layers")
 	}
+	standard := LayerStatusPass
+	if report.Decision == "quarantine" {
+		standard = LayerStatusQuarantined
+	}
 	want := []struct {
 		name   string
 		status map[string]bool
 		sha    string
 	}{
-		{LayerStandard, map[string]bool{LayerStatusPass: true}, report.Evidence.Audit.SHA256},
+		{LayerStandard, map[string]bool{standard: true}, report.Evidence.Audit.SHA256},
 		{LayerVerified, map[string]bool{LayerStatusPass: true}, report.Evidence.TestManifest.SHA256},
 		{LayerPublicationReady, map[string]bool{LayerStatusReady: true, LayerStatusPendingExplicitApproval: true}, report.SubjectRevision},
 	}
@@ -326,6 +374,9 @@ func validateLayersV1(report ProblemQualityReportV1) error {
 		if layer.Name != expected.name || !expected.status[layer.Status] || strings.TrimSpace(layer.Basis) == "" || layer.EvidenceSHA256 != expected.sha {
 			return fmt.Errorf("quality layer %d is invalid", index)
 		}
+	}
+	if report.HumanApproved && (report.Layers[2].Status != LayerStatusReady || report.Layers[2].Basis != "current_human_approval_and_assets_revalidated") {
+		return errors.New("human-approved publication layer must remain separate from automatic quality")
 	}
 	return nil
 }

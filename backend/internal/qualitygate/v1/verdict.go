@@ -15,9 +15,12 @@ const (
 	AuditSchemaVersionV1             = "algoforge.s3-quality-audit.v1"
 	RuleVersionV1                    = "algoforge.s3-quality-gate.v1"
 
-	GateStatusPass        = "pass"
-	GateStatusBlocked     = "blocked"
-	GateStatusCheckFailed = "check_failed"
+	GateStatusPass          = "pass"
+	GateStatusBlocked       = "blocked"
+	GateStatusCheckFailed   = "check_failed"
+	GateStatusNotConfigured = "not_configured"
+
+	PolicyProblemSetTraining = "problem_set_training"
 
 	DecisionPass       = "pass"
 	DecisionQuarantine = "quarantine"
@@ -88,6 +91,7 @@ type HiddenRegressionEvidenceV1 struct {
 // and the minimal executor result.
 type S3EvidenceV1 struct {
 	SchemaVersion       string                     `json:"schema_version"`
+	Policy              string                     `json:"policy,omitempty"`
 	SubjectID           string                     `json:"subject_id"`
 	SubjectRevision     string                     `json:"subject_revision"`
 	SpecLint            GateEvidenceV1             `json:"spec_lint"`
@@ -132,6 +136,7 @@ type GateResultV1 struct {
 
 type AuditV1 struct {
 	SchemaVersion            string            `json:"schema_version"`
+	Policy                   string            `json:"policy,omitempty"`
 	RuleVersion              string            `json:"rule_version"`
 	RuleSHA256               string            `json:"rule_sha256"`
 	InputSHA256              string            `json:"input_sha256"`
@@ -143,6 +148,7 @@ type AuditV1 struct {
 	ReviewerAdvisoryApproved bool              `json:"reviewer_advisory_approved"`
 	GateResults              []GateResultV1    `json:"gate_results"`
 	BlockingIssues           []BlockingIssueV1 `json:"blocking_issues"`
+	Warnings                 []BlockingIssueV1 `json:"warnings,omitempty"`
 }
 
 type ruleDescriptorV1 struct {
@@ -156,6 +162,16 @@ type ruleDescriptorV1 struct {
 	HiddenExposureDecision         string   `json:"hidden_exposure_decision"`
 	DeterministicBlockersTakeFirst bool     `json:"deterministic_blockers_take_priority"`
 	MaxRepairRounds                int      `json:"max_repair_rounds"`
+	Policy                         string   `json:"policy,omitempty"`
+	DifficultyCalibrationAdvisory  bool     `json:"difficulty_calibration_advisory,omitempty"`
+	UnconfiguredHiddenOptional     bool     `json:"unconfigured_hidden_optional,omitempty"`
+}
+
+func ValidatePolicyV1(policy string) error {
+	if policy != "" && policy != PolicyProblemSetTraining {
+		return fmt.Errorf("unsupported S3 quality policy %q", policy)
+	}
+	return nil
 }
 
 func (asset EvidenceAssetV1) Validate() error {
@@ -230,6 +246,9 @@ func (evidence S3EvidenceV1) Validate() error {
 	if evidence.SchemaVersion != S3EvidenceSchemaVersionV1 {
 		return fmt.Errorf("S3 evidence schema_version %q, want %q", evidence.SchemaVersion, S3EvidenceSchemaVersionV1)
 	}
+	if err := ValidatePolicyV1(evidence.Policy); err != nil {
+		return err
+	}
 	if err := validateSubjectIdentityV1(evidence.SubjectID, evidence.SubjectRevision); err != nil {
 		return err
 	}
@@ -261,8 +280,14 @@ func (evidence S3EvidenceV1) Validate() error {
 	if err := validateDedupEvidenceV1(evidence.Dedup); err != nil {
 		return err
 	}
-	if err := validateGateStatusV1(evidence.HiddenRegression.Status); err != nil {
-		return fmt.Errorf("hidden_regression: %w", err)
+	if evidence.HiddenRegression.Status == GateStatusNotConfigured {
+		if evidence.Policy != PolicyProblemSetTraining || len(evidence.HiddenRegression.Blockers) != 0 || evidence.HiddenRegression.ExposureDetected {
+			return errors.New("only a training policy may omit an unconfigured hidden regression without blockers or exposure")
+		}
+	} else {
+		if err := validateGateStatusV1(evidence.HiddenRegression.Status); err != nil {
+			return fmt.Errorf("hidden_regression: %w", err)
+		}
 	}
 	if err := evidence.HiddenRegression.Evidence.Validate(); err != nil {
 		return fmt.Errorf("hidden_regression evidence: %w", err)
@@ -355,7 +380,7 @@ func RecomputeVerdictV1(evidence S3EvidenceV1) (AuditV1, error) {
 	if err != nil {
 		return AuditV1{}, err
 	}
-	_, ruleSHA, err := CanonicalRuleV1()
+	_, ruleSHA, err := CanonicalRuleForPolicyV1(evidence.Policy)
 	if err != nil {
 		return AuditV1{}, err
 	}
@@ -381,11 +406,24 @@ func RecomputeVerdictV1(evidence S3EvidenceV1) (AuditV1, error) {
 		}
 	}
 
-	reviewerAdvisory := reviewAdvisoryApprovedV1(evidence.Reviewer.Assessment)
+	reviewerIssues := reviewerIssuesV1(evidence.Reviewer)
+	warnings := []BlockingIssueV1{}
+	if evidence.Policy == PolicyProblemSetTraining {
+		blocking := make([]BlockingIssueV1, 0, len(reviewerIssues))
+		for _, issue := range reviewerIssues {
+			if isTrainingDifficultyIssueV1(issue.Code) {
+				warnings = append(warnings, issue)
+			} else {
+				blocking = append(blocking, issue)
+			}
+		}
+		reviewerIssues = blocking
+	}
+	reviewerAdvisory := len(reviewerIssues) == 0
 	reviewerStatus := GateStatusPass
 	if !reviewerAdvisory {
 		reviewerStatus = GateStatusBlocked
-		issues = append(issues, reviewerIssuesV1(evidence.Reviewer)...)
+		issues = append(issues, reviewerIssues...)
 	}
 	gateResults = append(gateResults, GateResultV1{Gate: GateReviewerSchemaVerdict, Status: reviewerStatus})
 
@@ -408,18 +446,20 @@ func RecomputeVerdictV1(evidence S3EvidenceV1) (AuditV1, error) {
 		})
 	}
 	gateResults = append(gateResults, GateResultV1{Gate: GateHiddenRegression, Status: hiddenStatus})
-	if evidence.HiddenRegression.Status != GateStatusPass {
+	if evidence.HiddenRegression.Status != GateStatusPass && evidence.HiddenRegression.Status != GateStatusNotConfigured {
 		deterministicPassed = false
 		issues = append(issues, issuesForGateV1(GateHiddenRegression, evidence.HiddenRegression.Status, evidence.HiddenRegression.Evidence, evidence.HiddenRegression.Blockers)...)
 	}
 
 	sortBlockingIssuesV1(issues)
+	sortBlockingIssuesV1(warnings)
 	decision := DecisionPass
 	if len(issues) > 0 {
 		decision = DecisionQuarantine
 	}
 	return AuditV1{
 		SchemaVersion:            AuditSchemaVersionV1,
+		Policy:                   evidence.Policy,
 		RuleVersion:              RuleVersionV1,
 		RuleSHA256:               ruleSHA,
 		InputSHA256:              inputSHA,
@@ -431,6 +471,7 @@ func RecomputeVerdictV1(evidence S3EvidenceV1) (AuditV1, error) {
 		ReviewerAdvisoryApproved: reviewerAdvisory,
 		GateResults:              gateResults,
 		BlockingIssues:           issues,
+		Warnings:                 warnings,
 	}, nil
 }
 
@@ -447,6 +488,13 @@ func CanonicalInputV1(evidence S3EvidenceV1) ([]byte, string, error) {
 }
 
 func CanonicalRuleV1() ([]byte, string, error) {
+	return CanonicalRuleForPolicyV1("")
+}
+
+func CanonicalRuleForPolicyV1(policy string) ([]byte, string, error) {
+	if err := ValidatePolicyV1(policy); err != nil {
+		return nil, "", err
+	}
 	descriptor := ruleDescriptorV1{
 		RuleVersion:                    RuleVersionV1,
 		GateOrder:                      append([]string(nil), gateOrderV1...),
@@ -459,6 +507,11 @@ func CanonicalRuleV1() ([]byte, string, error) {
 		DeterministicBlockersTakeFirst: true,
 		MaxRepairRounds:                MaxRepairRoundsV1,
 	}
+	if policy == PolicyProblemSetTraining {
+		descriptor.Policy = policy
+		descriptor.DifficultyCalibrationAdvisory = true
+		descriptor.UnconfiguredHiddenOptional = true
+	}
 	encoded, err := json.Marshal(descriptor)
 	if err != nil {
 		return nil, "", fmt.Errorf("encode quality-gate rule: %w", err)
@@ -467,6 +520,9 @@ func CanonicalRuleV1() ([]byte, string, error) {
 }
 
 func CanonicalAuditV1(audit AuditV1) ([]byte, string, error) {
+	if err := ValidatePolicyV1(audit.Policy); err != nil {
+		return nil, "", err
+	}
 	if audit.SchemaVersion != AuditSchemaVersionV1 || audit.RuleVersion != RuleVersionV1 {
 		return nil, "", errors.New("audit schema_version or rule_version is invalid")
 	}
@@ -479,15 +535,25 @@ func CanonicalAuditV1(audit AuditV1) ([]byte, string, error) {
 	canonical := audit
 	canonical.GateResults = append([]GateResultV1(nil), audit.GateResults...)
 	canonical.BlockingIssues = append([]BlockingIssueV1{}, audit.BlockingIssues...)
+	canonical.Warnings = append([]BlockingIssueV1(nil), audit.Warnings...)
 	sort.Slice(canonical.GateResults, func(i, j int) bool {
 		return gateRankV1(canonical.GateResults[i].Gate) < gateRankV1(canonical.GateResults[j].Gate)
 	})
 	sortBlockingIssuesV1(canonical.BlockingIssues)
+	sortBlockingIssuesV1(canonical.Warnings)
 	encoded, err := json.Marshal(canonical)
 	if err != nil {
 		return nil, "", fmt.Errorf("encode canonical audit: %w", err)
 	}
 	return encoded, sha256HexV1(encoded), nil
+}
+
+func isTrainingDifficultyIssueV1(code string) bool {
+	return code == "review.score_below_threshold.difficulty_calibration" ||
+		strings.HasPrefix(code, "difficulty.") ||
+		strings.HasPrefix(code, "difficulty_calibration.") ||
+		strings.HasPrefix(code, "review.difficulty.") ||
+		code == "review.difficulty_mismatch"
 }
 
 func normalizeEvidenceV1(evidence S3EvidenceV1) S3EvidenceV1 {

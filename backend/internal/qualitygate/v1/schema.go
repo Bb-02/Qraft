@@ -30,10 +30,12 @@ var stableCodePatternV1 = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
 // advisory: RecomputeVerdictV1 never treats it as the final gate decision.
 // Pointers distinguish required false/zero values from omitted JSON fields.
 type ReviewAssessmentV1 struct {
-	SchemaVersion string              `json:"schema_version"`
-	Approved      *bool               `json:"approved"`
-	Dimensions    *ReviewDimensionsV1 `json:"dimensions"`
-	Blockers      []ReviewBlockerV1   `json:"blockers"`
+	SchemaVersion         string              `json:"schema_version"`
+	Approved              *bool               `json:"approved"`
+	Dimensions            *ReviewDimensionsV1 `json:"dimensions"`
+	Blockers              []ReviewBlockerV1   `json:"blockers"`
+	EstimatedDifficulty   *int                `json:"estimated_difficulty,omitempty"`
+	DifficultyExplanation string              `json:"difficulty_explanation,omitempty"`
 }
 
 type ReviewDimensionsV1 struct {
@@ -119,6 +121,16 @@ func (assessment ReviewAssessmentV1) Validate() error {
 	if assessment.Blockers == nil {
 		return errors.New("review blockers must be an explicit array")
 	}
+	if assessment.EstimatedDifficulty != nil {
+		if *assessment.EstimatedDifficulty < 1 || *assessment.EstimatedDifficulty > 10000 {
+			return errors.New("estimated difficulty must be an integer between 1 and 10000")
+		}
+		if strings.TrimSpace(assessment.DifficultyExplanation) == "" || len(assessment.DifficultyExplanation) > 4096 {
+			return errors.New("difficulty explanation is required with an estimate and must not exceed 4096 bytes")
+		}
+	} else if len(assessment.DifficultyExplanation) > 4096 {
+		return errors.New("difficulty explanation must not exceed 4096 bytes")
+	}
 
 	dimensions := []struct {
 		name  string
@@ -157,6 +169,38 @@ func (assessment ReviewAssessmentV1) Validate() error {
 		seen[identity] = struct{}{}
 	}
 	return nil
+}
+
+// DecodeTrainingReviewAssessmentV1 preserves the strict correctness contract
+// while treating an optional model difficulty estimate as advisory data. An
+// absent or malformed estimate cannot discard an otherwise complete review.
+func DecodeTrainingReviewAssessmentV1(data []byte) (ReviewAssessmentV1, error) {
+	if len(data) == 0 || len(data) > maxReviewAssessmentBytesV1 {
+		return ReviewAssessmentV1{}, errors.New("training review JSON is empty or exceeds the size limit")
+	}
+	if err := validateSingleJSONValueNoDuplicateKeysV1(data); err != nil {
+		return ReviewAssessmentV1{}, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil || fields == nil {
+		return ReviewAssessmentV1{}, errors.New("training review must be one JSON object")
+	}
+	var estimate int
+	var explanation string
+	estimateErr := json.Unmarshal(fields["estimated_difficulty"], &estimate)
+	explanationErr := json.Unmarshal(fields["difficulty_explanation"], &explanation)
+	if estimateErr != nil || estimate < 1 || estimate > 10000 {
+		delete(fields, "estimated_difficulty")
+		explanation = "预估未完成；现有题面、正确性和测试评审结果已保留。"
+	} else if explanationErr != nil || strings.TrimSpace(explanation) == "" || len(explanation) > 4096 {
+		explanation = "评审模型给出了参考难度，但未提供有效的预估说明。"
+	}
+	fields["difficulty_explanation"], _ = json.Marshal(explanation)
+	normalized, err := json.Marshal(fields)
+	if err != nil {
+		return ReviewAssessmentV1{}, err
+	}
+	return DecodeReviewAssessmentV1(normalized)
 }
 
 func (dimension ReviewDimensionV1) validate(name string) error {
