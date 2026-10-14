@@ -16,6 +16,9 @@ export function businessTaskTitle(workflow: WorkflowState): string {
 }
 
 export function businessTaskStatus(workflow: WorkflowState): string {
+  // A historical set run has no durable result snapshot. Its execution may
+  // finish even when every question failed, so completion is not a verdict.
+  if (isProblemSetTask(workflow) && !workflow.task?.status && normalizeStatus(workflow.status) === 'approved') return 'ended';
   return normalizeStatus(workflow.task?.status || workflow.status);
 }
 
@@ -23,6 +26,7 @@ export function businessTaskStatusLabel(workflow: WorkflowState): string {
   const labels: Record<string, string> = {
     queued: '已排队，尚未开始', pending: '等待处理', planning: '正在规划', generating: '正在生成与检查',
     running: '已提交 / 处理中', waiting_review: '等待审核', awaiting_review: '等待审核', partial: '需要处理',
+    ended: '已结束，结果请查看题集',
     completed: '已完成', approved: '已完成', succeeded: '已完成', failed: '失败', cancelled: '已停止', rejected_quarantined: '待人工复核',
   };
   return labels[businessTaskStatus(workflow)] || '状态暂未识别';

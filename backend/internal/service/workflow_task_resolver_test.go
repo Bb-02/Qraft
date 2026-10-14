@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"testing"
 
 	"github.com/Gingoo-TvT/Qraft/backend/internal/access"
@@ -78,6 +79,7 @@ func TestWorkflowTaskResolverCurrentAndHistoricalSetRuns(t *testing.T) {
 	require.Nil(t, task.CompletedCount)
 	require.Nil(t, task.TotalCount)
 	require.Contains(t, task.Summary, "历史生成")
+	require.Contains(t, task.Summary, "执行已结束不代表所有题目成功，请在题集查看结果")
 }
 
 func TestWorkflowTaskResolverCurrentChildHasRealSetTitleAndPosition(t *testing.T) {
@@ -208,4 +210,53 @@ func TestWorkflowTaskResolverExplainsHistoricalFailuresWithoutMutatingEvidence(t
 	require.NoError(t, err)
 	require.NotContains(t, task.Summary, slot.Error)
 	require.Equal(t, "这道题未完成，可以回到题集查看情况并重试。", task.Summary)
+}
+
+func TestWorkflowTaskResolverStandaloneQuarantineIsNotReportedAsSuccessfulGeneration(t *testing.T) {
+	for _, typ := range []string{generationapi.QualityWorkflowTypeV1, "ProblemGenerationWorkflow", "ProblemImportWorkflow", "ImportedProblemWorkflow", "ProblemValidationWorkflow"} {
+		t.Run(typ, func(t *testing.T) {
+			ctx, fixture, resolver, _, child := newWorkflowTaskFixture(t)
+			fixture.problem = &domain.Problem{ID: uuid.New(), Title: "合成隔离候选", WorkflowID: &child, Status: domain.ProblemStatusQuarantined}
+			task, err := resolver.Resolve(ctx, child, typ, "")
+			require.NoError(t, err)
+			if typ == "ProblemValidationWorkflow" {
+				require.Empty(t, task.Status, "validation execution retains its existing status behavior")
+			} else {
+				require.Equal(t, string(domain.WorkflowStatusRejectedQuarantined), task.Status)
+				require.Contains(t, task.Summary, "人工检查")
+			}
+			require.Equal(t, "/problems/"+fixture.problem.ID.String(), task.ResultURL)
+			fixture.problem.Status = domain.ProblemStatusPublished
+			task, err = resolver.Resolve(ctx, child, typ, "")
+			require.NoError(t, err)
+			require.Empty(t, task.Status, "other persisted statuses retain existing behavior")
+		})
+	}
+}
+
+func TestWorkflowTaskResolverBusinessEntrypointsUseExistingImportAndRatingContracts(t *testing.T) {
+	ctx, fixture, resolver, _, _ := newWorkflowTaskFixture(t)
+	workflowID := "problem-import-synthetic space/&?extra=1"
+	task, err := resolver.Resolve(ctx, workflowID, "ProblemImportWorkflow", "")
+	require.NoError(t, err)
+	entry, err := url.Parse(task.SourceURL)
+	require.NoError(t, err)
+	require.Equal(t, "/problems/import", entry.Path)
+	require.Equal(t, workflowID, entry.Query().Get("workflow"))
+	require.Len(t, entry.Query(), 1)
+	assessment := uuid.New()
+	admin := access.WithPrincipal(context.Background(), access.Principal{UserID: "synthetic-admin", Role: "admin"})
+	before := fixture.reads
+	task, err = resolver.Resolve(admin, "rating-"+assessment.String(), "RatingWorkflow", "")
+	require.NoError(t, err)
+	require.Equal(t, "/rating?assessment="+assessment.String(), task.SourceURL)
+	require.Equal(t, before, fixture.reads, "confirmed identifier derivation needs no database or Temporal query")
+	for _, id := range []string{"rating-unknown", "rating-" + uuid.Nil.String(), "rating-" + assessment.String() + "-suffix"} {
+		task, err = resolver.Resolve(admin, id, "RatingWorkflow", "")
+		require.NoError(t, err)
+		require.Empty(t, task.SourceURL)
+	}
+	task, err = resolver.Resolve(ctx, "rating-"+assessment.String(), "RatingWorkflow", "")
+	require.NoError(t, err)
+	require.Empty(t, task.SourceURL, "members cannot read administrator-only assessments")
 }

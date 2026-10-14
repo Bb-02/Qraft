@@ -267,7 +267,7 @@ export default function WorkflowDetailPage() {
   const recoveryURL = problemSetRecoveryURL(workflow);
   const sourceURL = safeBusinessTaskURL(workflow.task?.source_url);
   const resultURL = safeBusinessTaskURL(workflow.task?.result_url);
-  const isTerminal = statusIsTerminal(friendly);
+  const isTerminal = friendly === 'completed' || statusIsTerminal(workflow.status);
   const problemId = workflow.state?.problem_id;
   const currentReview = workflow.review_request;
   const submittedCurrentReview = Boolean(

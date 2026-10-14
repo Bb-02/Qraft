@@ -26,9 +26,31 @@ export type GenerationCandidateState = 'saved' | 'incomplete' | 'none';
 const FAILURE_CATEGORY_LABELS: Record<string, string> = {
   model_output_format: '模型输出格式错误', model_response_format: '模型输出格式错误', model_authentication: '模型访问配置问题',
   model_rate_limit: '模型额度或限流', service_timeout: '服务响应超时', compile_failed: '参考程序编译错误',
-  duplicate_candidate: '题目内容重复', quality_review_required: '自动质量检查未通过', verification_failed: '答案或数据验证问题',
+  duplicate_candidate: '题目内容重复', quality_review_required: '自动质量检查未通过', spec_lint_failed: '题意与约束检查未通过', verification_failed: '答案或数据验证问题',
   verification_unavailable: '执行服务连接问题', invalid_difficulty: '生成参数问题',
 };
+
+const QUALITY_GATE_FAILURES: Record<string, { category: string; stage: string; reason: string }> = {
+  spec_lint: { category: '题意与约束检查未通过', stage: '设计题意与约束', reason: '结构化题意、变量范围或约束关联尚未通过一致性检查。' },
+  sample_output_binding: { category: '样例输出检查未通过', stage: '核对样例输出', reason: '样例、题面与参考程序的输出尚未核对一致。' },
+  oracle_differential: { category: '参考答案对比未通过', stage: '比对参考答案', reason: '参考程序与独立校验程序的结果尚未核对一致。' },
+  sanitizer: { category: '参考程序运行检查未通过', stage: '检查程序运行错误', reason: '参考程序尚未通过运行与内存安全检查，需要核对程序和失败用例。' },
+  boundary_coverage: { category: '测试数据覆盖检查未通过', stage: '检查测试数据覆盖', reason: '测试数据的边界或特殊情况覆盖尚未通过检查。' },
+  test_manifest: { category: '测试数据完整性检查未通过', stage: '检查测试数据与题目文件', reason: '测试数据清单及文件的完整性尚未通过校验。' },
+  reviewer_schema_verdict: { category: '模型评审需要确认', stage: '自动评审题目', reason: '模型评审提出了需要核对的问题，尚未取得通过结论。' },
+  dedup: { category: '题目去重检查未通过', stage: '检查题目重复', reason: '候选可能存在重复内容，或去重检查未能完成，需要核对具体报告。' },
+  hidden_regression: { category: '额外验证尚未通过', stage: '运行额外验证', reason: '额外验证未能完成或结果需要检查；这项状态本身不代表题目已被证实有错。' },
+};
+
+const INCOMPLETE_CANDIDATE_SUGGESTION = '这道候选题需要重新生成，查看未通过项并修正需求后，重试未完成题目；旧候选仍保留。';
+const MANUAL_REVIEW_SUGGESTION = /人工|管理员.*(?:确认|批准|审核|通过)/;
+
+function qualityFailureSuggestion(candidate?: GenerationCandidateState): string {
+  return candidate === 'none' ? '当前没有可供人工审核的候选题。修正生成设置后重试未完成题目。'
+    : candidate === 'incomplete' ? INCOMPLETE_CANDIDATE_SUGGESTION
+      : candidate === 'saved' ? '查看未通过项并检查候选题，先修复存在的问题；完整候选可以由管理员人工审核。'
+        : '查看未通过项与生成结果，按对应题位的提示修复或重新生成。';
+}
 
 export function generationCandidateState(slot: { problem_id?: string; quiz_id?: string; regenerate?: boolean }): GenerationCandidateState {
   if (!slot.problem_id && !slot.quiz_id) return 'none';
@@ -47,10 +69,23 @@ export function generationFailureSummary(error: string, failure?: GenerationFail
   let stage = '生成流程';
   let reason = '本次生成未完成，具体原因暂时无法归纳；原始记录保留在技术详情中。';
   let retryable = failure?.retryable;
+  const gate = failure?.code === 'spec_lint_failed' ? 'spec_lint' : failure?.blocked_gate || (/deterministic spec[_ ]lint failed|spec_lint_failed/i.test(evidence) ? 'spec_lint' : undefined);
+  const gateFailure = gate ? QUALITY_GATE_FAILURES[gate] : undefined;
+  const blockingReasons = failure?.blocking_issues?.filter(issue => /[\u3400-\u9fff]/.test(issue)).map(issue => issue.trim()).filter(Boolean);
   const authoringFormat = /pars(?:e|ing).*authoring[-_ ]plan response|authoring[-_ ]plan.*(?:unmarshal|invalid json|schema)|InvalidAuthoringPlanResponse|AuthoringPlan(?:Format|Truncated)Error/i.test(evidence);
   const reviewerFormat = /Reviewer(?:Format|Truncated)Error|decode (?:strict reviewer|review assessment)/i.test(evidence);
 
-  if (authoringFormat || reviewerFormat) {
+  if (gateFailure) {
+    ({ category, stage, reason } = gateFailure);
+    if (blockingReasons?.length) reason = blockingReasons.join('；');
+    message = category + '。';
+    suggestion = qualityFailureSuggestion(candidate);
+  } else if (failure?.code === 'quality_review_required' || failure?.code === 'quality_not_met') {
+    category = '自动质量检查未通过'; stage = '自动评审与质量检查';
+    reason = blockingReasons?.length ? blockingReasons.join('；') : '至少一项自动检查尚未通过，需要结合具体报告核对。';
+    message = '自动质量检查暂未通过。';
+    suggestion = qualityFailureSuggestion(candidate);
+  } else if (authoringFormat || reviewerFormat) {
     category = '模型输出格式错误'; stage = authoringFormat ? '设计题意与约束' : '评审题目';
     message = authoringFormat ? '作者模型的回复不符合题目设计所需的格式。' : '评审模型的回复不符合质量评审所需的格式。';
     reason = '模型回复无法按约定的数据结构读取，当前步骤尚未完成。';
@@ -93,7 +128,7 @@ export function generationFailureSummary(error: string, failure?: GenerationFail
   } else if (/QualityNotMet|quality gates?|质量校验|质量门禁|未通过.*复核|QuizQualityNotMet/i.test(evidence)) {
     category = '自动质量检查未通过'; stage = '自动评审与质量检查'; reason = '至少一项自动检查尚未通过，需要结合具体报告核对。';
     message = '自动质量检查暂未通过。';
-    suggestion = candidate === 'none' ? '当前没有可供人工审核的候选题。修正生成设置后重试未完成题目。' : candidate === 'incomplete' ? '已保存的候选尚未完整，请先检查并修正，再重新生成。' : '查看未通过项。候选已保存时，管理员可以人工审核；有错误时先修复或重试。';
+    suggestion = qualityFailureSuggestion(candidate);
   } else if (/unavailable|connection refused|connect.*failed|network|fetch failed|ECONN|服务.*不可用|无法连接/i.test(evidence)) {
     category = '执行服务连接问题'; stage = '连接生成或验证服务'; reason = '当前步骤所需的服务没有正常响应。';
     message = '生成所需的服务暂时无法连接。';
@@ -115,21 +150,27 @@ export function generationFailureSummary(error: string, failure?: GenerationFail
   }
   if (failure?.reason && /[\u3400-\u9fff]/.test(failure.reason)) reason = failure.reason.trim();
   if (candidate === 'none' && /人工|候选/.test(suggestion) && !authoringFormat && !reviewerFormat) suggestion = '当前没有可供人工审核的候选题。先处理上述原因，再重试未完成题目。';
+  if (candidate === 'incomplete' && MANUAL_REVIEW_SUGGESTION.test(suggestion)) suggestion = INCOMPLETE_CANDIDATE_SUGGESTION;
+  if (candidate === undefined && MANUAL_REVIEW_SUGGESTION.test(suggestion)) suggestion = '查看未通过项与生成结果，确认候选完整性后，按对应题位的提示处理。';
   return { message, suggestion, category, stage, reason, retryable, technicalDetails: details === message ? '' : details };
 }
 
-export function commonGenerationFailure(slots: { status: string; error?: string; failure?: GenerationFailure }[]): { count: number; total: number; summary: GenerationFailureSummary } | undefined {
+export function commonGenerationFailure(slots: { status: string; error?: string; failure?: GenerationFailure; problem_id?: string; quiz_id?: string; regenerate?: boolean }[]): { count: number; total: number; summary: GenerationFailureSummary } | undefined {
   const failed = slots.filter(slot => slot.status === 'failed' || slot.status === 'awaiting_review');
-  const groups = new Map<string, { count: number; total: number; summary: GenerationFailureSummary }>();
+  const groups = new Map<string, { count: number; total: number; summary: GenerationFailureSummary; candidate: GenerationCandidateState }>();
   for (const slot of failed) {
-    const summary = generationFailureSummary(slot.error || '', slot.failure);
+    const candidate = generationCandidateState(slot);
+    const summary = generationFailureSummary(slot.error || '', slot.failure, 'set', candidate);
     if (summary.category === '生成服务错误' || summary.reason.includes('具体原因暂时无法归纳')) continue;
     const key = JSON.stringify([summary.category, summary.stage, summary.reason]);
     const group = groups.get(key);
-    if (group) group.count++;
-    else groups.set(key, { count: 1, total: failed.length, summary });
+    if (group) {
+      group.count++;
+      if (group.candidate !== candidate) group.summary = { ...group.summary, suggestion: '逐题查看未通过项与已保存结果，根据对应题位的提示修复或重新生成。' };
+    } else groups.set(key, { count: 1, total: failed.length, summary, candidate });
   }
-  return [...groups.values()].filter(group => group.count >= 2).sort((a, b) => b.count - a.count)[0];
+  const group = [...groups.values()].filter(group => group.count >= 2).sort((a, b) => b.count - a.count)[0];
+  return group ? { count: group.count, total: group.total, summary: group.summary } : undefined;
 }
 
 const GENERATION_STEP_LABELS: Record<string, string> = {

@@ -45,6 +45,7 @@ func (r *WorkflowTaskResolver) Resolve(ctx context.Context, workflowID, workflow
 	if r == nil || !authenticated {
 		return task, nil
 	}
+	task.SourceURL = workflowTaskBusinessSourceURL(identity, workflowID, workflowType)
 	setID, runID, isSetRoot := parseProblemSetTaskID(workflowID)
 	if isSetRoot {
 		set, err := r.readVisibleSet(ctx, identity, setID)
@@ -56,7 +57,7 @@ func (r *WorkflowTaskResolver) Resolve(ctx context.Context, workflowID, workflow
 		if canReadWorkflowTaskGeneration(identity, set) && set.Generation != nil && set.Generation.ID == runID {
 			applyCurrentSetTask(task, set)
 		} else if canReadWorkflowTaskGeneration(identity, set) && set.Generation != nil && set.Generation.ID != runID {
-			task.Summary = "这是已保存题集的一次历史生成，任务状态以本次执行记录为准。"
+			task.Summary = "这是该题集的一次历史生成。执行已结束不代表所有题目成功，请在题集查看结果。"
 		} else {
 			task.Summary = "题集已保存，本次任务状态以执行记录为准。"
 		}
@@ -86,6 +87,10 @@ func (r *WorkflowTaskResolver) Resolve(ctx context.Context, workflowID, workflow
 		parentSetID, position = workflowTaskProblemSetContext(problem)
 	}
 	if parentSetID == uuid.Nil {
+		if problem != nil && problem.Status == domain.ProblemStatusQuarantined && (kind == "problem_generation" || kind == "problem_import") {
+			task.Status = string(domain.WorkflowStatusRejectedQuarantined)
+			task.Summary = "候选题已保存并隔离，等待人工检查；任务执行结束不表示题目已经通过。"
+		}
 		return task, nil
 	}
 	set, err := r.readVisibleSet(ctx, identity, parentSetID)
@@ -197,7 +202,16 @@ func applyCurrentSetTask(task *domain.WorkflowTaskSummary, set *domain.ProblemSe
 		total = set.DesiredItemCount
 	}
 	task.Status, task.CompletedCount, task.TotalCount = set.Generation.Status, &completed, &total
-	task.Summary = fmt.Sprintf("已完成 %d / %d 道题，结果保存在题集页面。", completed, total)
+	switch set.Generation.Status {
+	case "completed":
+		task.Summary = "题目已生成，可以打开题集编排与导出。"
+	case "partial", "failed":
+		task.Summary = "这套题还有未完成题目，可打开题集查看原因并继续处理。"
+	case "cancelled":
+		task.Summary = "生成已停止，已保存题目会保留，可在题集页面继续处理。"
+	default:
+		task.Summary = "正在逐题生成并检查，完成的题目会逐题加入题集。"
+	}
 }
 
 func parseProblemSetTaskID(workflowID string) (uuid.UUID, string, bool) {

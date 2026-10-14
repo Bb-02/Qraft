@@ -48,7 +48,7 @@ test('legacy nested Temporal errors have a readable cause and keep their diagnos
     ['test_cases returned invalid count', /测试数据/, /补齐或修复/],
   ];
   for (const [raw, message, suggestion] of errors) {
-    const summary = failures.generationFailureSummary(raw);
+    const summary = failures.generationFailureSummary(raw, undefined, 'set', 'saved');
     assert.match(summary.message, message);
     assert.match(summary.suggestion, suggestion);
     assert.equal(summary.technicalDetails, raw);
@@ -58,11 +58,11 @@ test('legacy nested Temporal errors have a readable cause and keep their diagnos
 
 test('server-owned failure messages and suggestions take precedence over keyword guesses', () => {
   const failure = { code: 'quality_not_met', message: '评审对题面清晰度有疑问，候选已保留。', suggestion: '检查未通过项后可人工审核。', technical_details: 'synthetic diagnostic', blocking_issues: ['样例解释还需补充。'] };
-  const summary = failures.generationFailureSummary('QualityNotMet', failure);
+  const summary = failures.generationFailureSummary('QualityNotMet', failure, 'set', 'saved');
   assert.equal(summary.message, failure.message);
   assert.equal(summary.suggestion, failure.suggestion);
   assert.equal(summary.technicalDetails, failure.technical_details);
-  const html = renderToStaticMarkup(React.createElement(Notice, { error: 'QualityNotMet', failure }));
+  const html = renderToStaticMarkup(React.createElement(Notice, { error: 'QualityNotMet', failure, candidate: 'saved' }));
   assert.match(html, /样例解释还需补充/);
   assert.match(html, /<details[^>]*><summary[^>]*>技术详情/);
   assert.ok(html.indexOf(failure.message) < html.indexOf('<details'));
@@ -207,4 +207,54 @@ test('twelve same authoring failures share a cause without merging unrelated or 
   assert.equal(shared.summary.category, '模型输出格式错误');
   assert.equal(failures.commonGenerationFailure([{ status: 'failed', error: 'unknown a' }, { status: 'failed', error: 'unknown b' }]), undefined);
   assert.equal(failures.commonGenerationFailure([{ status: 'failed', error: 'HTTP 401 unauthorized' }, { status: 'failed', error: 'parsing authoring-plan response: unknown field "extra"' }]), undefined);
+});
+
+test('old and enriched spec lint failures explain constraints and prevent manual approval of incomplete candidates', () => {
+  const base = { code: 'quality_review_required', blocked_gate: 'spec_lint', message: '题意与约束描述尚未通过检查', suggestion: '查看检查结果，修复或由管理员人工确认后继续入集。', technical_details: 'deterministic spec lint failed' };
+  const enriched = { ...base, code: 'spec_lint_failed', category: '题意与约束检查未通过', stage: '设计题意与约束', reason: '合成变量的取值范围与约束关联不一致。', blocking_issues: ['合成边界定义需要补充。'] };
+  for (const failure of [base, enriched]) {
+    const summary = failures.generationFailureSummary(failure.message, failure, 'set', 'incomplete');
+    assert.equal(summary.category, '题意与约束检查未通过');
+    assert.equal(summary.stage, '设计题意与约束');
+    assert.match(summary.suggestion, /需要重新生成/);
+    assert.match(summary.suggestion, /旧候选仍保留/);
+    assert.doesNotMatch(summary.suggestion, /人工确认|管理员|人工审核/);
+    assert.equal(summary.technicalDetails, failure.technical_details);
+    const html = renderSlot({ ...slot, status: 'failed', regenerate: true, failure, error: failure.message });
+    assert.match(html, /题意与约束检查未通过/);
+    assert.match(html, /仅保存了未完成候选/);
+    assert.doesNotMatch(html, /人工确认|人工审核并恢复原题位/);
+  }
+  assert.equal(failures.generationFailureSummary('', base).reason, '结构化题意、变量范围或约束关联尚未通过一致性检查。');
+  assert.equal(failures.generationFailureSummary('', enriched).reason, enriched.reason);
+  const issuesOnly = { ...base, blocking_issues: ['合成输入长度与数组约束不一致。'] };
+  assert.equal(failures.generationFailureSummary('', issuesOnly).reason, issuesOnly.blocking_issues[0]);
+  assert.equal(failures.generationFailureSummary('deterministic spec lint failed').category, '题意与约束检查未通过');
+  assert.doesNotMatch(failures.generationFailureSummary('', base, 'set', 'none').suggestion, /人工确认|管理员/);
+  assert.doesNotMatch(failures.generationFailureSummary('', base).suggestion, /人工确认|管理员/);
+  assert.match(failures.generationFailureSummary('', base, 'set', 'saved').suggestion, /管理员人工确认/);
+  const repeated = Array.from({ length: 12 }, () => ({ status: 'failed', problem_id: 'synthetic-retained', regenerate: true, failure: base }));
+  const common = failures.commonGenerationFailure(repeated);
+  assert.equal(common.count, 12);
+  assert.equal(common.summary.category, '题意与约束检查未通过');
+  assert.match(common.summary.suggestion, /需要重新生成/);
+  assert.doesNotMatch(common.summary.suggestion, /人工确认|管理员/);
+  const mixed = failures.commonGenerationFailure([{ ...repeated[0], regenerate: false }, repeated[1]]);
+  assert.match(mixed.summary.suggestion, /根据对应题位/);
+  assert.doesNotMatch(mixed.summary.suggestion, /人工确认|管理员/);
+});
+
+test('each known structured quality gate has a readable classification and stage', () => {
+  const gates = {
+    spec_lint: '设计题意与约束', sample_output_binding: '核对样例输出', oracle_differential: '比对参考答案',
+    sanitizer: '检查程序运行错误', boundary_coverage: '检查测试数据覆盖', test_manifest: '检查测试数据与题目文件',
+    reviewer_schema_verdict: '自动评审题目', dedup: '检查题目重复', hidden_regression: '运行额外验证',
+  };
+  for (const [gate, stage] of Object.entries(gates)) {
+    const summary = failures.generationFailureSummary('', { code: 'quality_review_required', blocked_gate: gate, message: '合成候选需要处理', technical_details: 'synthetic gate evidence' }, 'set', 'incomplete');
+    assert.notEqual(summary.category, '生成服务错误');
+    assert.equal(summary.stage, stage);
+    assert.doesNotMatch(summary.reason, /具体原因暂时无法归纳/);
+    assert.match(summary.suggestion, /重新生成/);
+  }
 });

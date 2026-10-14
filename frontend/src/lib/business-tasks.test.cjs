@@ -117,6 +117,25 @@ test('unfinished sets link to their set recovery flow instead of generic workflo
   assert.doesNotMatch(html, />通过审核</);
 });
 
+test('completed historical set executions without a business snapshot are neutral and remain terminal', () => {
+  for (const status of ['Completed', 'WORKFLOW_EXECUTION_STATUS_COMPLETED']) {
+    const historical = { ...parent, status, task: { kind: 'problem_set', title: '合成历史题集', source_url: '/problem-sets/synthetic-set' } };
+    assert.equal(tasks.businessTaskStatus(historical), 'ended');
+    assert.equal(tasks.businessTaskStatusLabel(historical), '已结束，结果请查看题集');
+    assert.equal(tasks.problemSetRecoveryURL(historical), undefined);
+    assert.match(render([historical]), /已结束，结果请查看题集/);
+    detailWorkflow = historical;
+    const html = renderToStaticMarkup(React.createElement(DetailPage));
+    assert.match(html, /已结束，结果请查看题集/);
+    assert.match(html, /href="\/problem-sets\/synthetic-set"/);
+    assert.doesNotMatch(html, /这次执行已完成|正在重连|实时更新|>取消<|>重试<|实际完成/);
+  }
+  const problem = { workflow_id: 'synthetic-completed-problem', status: 'Completed', task: { kind: 'problem', title: '合成单题' } };
+  assert.equal(tasks.businessTaskStatus(problem), 'approved');
+  assert.equal(tasks.businessTaskStatusLabel(problem), '已完成');
+  assert.equal(tasks.businessTaskStatus({ ...parent, task: { ...parent.task, status: 'completed' } }), 'completed');
+});
+
 test('old metadata and disconnected lists remain understandable without fabricated task facts', () => {
   assert.match(render([{ workflow_id: 'legacy-opaque-id', status: 'Running' }]), /未识别任务/);
   assert.match(render([children[0]]), /主任务不在本页/);
