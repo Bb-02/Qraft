@@ -28,13 +28,14 @@ type setTagReader interface {
 	GetAll(context.Context) ([]domain.TagCategory, error)
 }
 type ProblemSetGenerationService struct {
-	sets     *ProblemSetService
-	repo     problemSetGenerationStore
-	problems *ProblemService
-	tags     setTagReader
-	temporal client.Client
-	queue    string
-	resolve  ProblemSetProviderResolver
+	sets            *ProblemSetService
+	repo            problemSetGenerationStore
+	problems        *ProblemService
+	tags            setTagReader
+	temporal        client.Client
+	queue           string
+	resolve         ProblemSetProviderResolver
+	runtimeWarnings func(context.Context) ([]string, error)
 }
 
 func NewProblemSetGenerationService(sets *ProblemSetService, repo problemSetGenerationStore, problems *ProblemService, tags setTagReader, temporalClient client.Client, queue string, resolve ProblemSetProviderResolver) *ProblemSetGenerationService {
@@ -75,7 +76,7 @@ func (s *ProblemSetGenerationService) Start(ctx context.Context, id uuid.UUID) (
 		}
 	}
 	if next.Status != "queued" {
-		return next, nil
+		return s.submittedSetRuntime(ctx, next), nil
 	}
 	ref := domain.ProblemSetGenerationRef{SetID: id, RunID: next.ID}
 	_, err = s.temporal.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
@@ -88,9 +89,12 @@ func (s *ProblemSetGenerationService) Start(ctx context.Context, id uuid.UUID) (
 		// An uncertain start keeps its reservation. Repeating it uses the same ID.
 		return nil, fmt.Errorf("generation start unavailable: 启动尚未确认，请在题集页继续启动: %w", err)
 	}
-	return next, nil
+	return s.submittedSetRuntime(ctx, next), nil
 }
 func (s *ProblemSetGenerationService) Status(ctx context.Context, id uuid.UUID) (*domain.ProblemSetGenerationState, error) {
+	if s == nil || s.sets == nil || s.sets.repo == nil {
+		return nil, fmt.Errorf("problem-set generation is unavailable")
+	}
 	if err := s.sets.requireSetAccess(ctx, id, true); err != nil {
 		return nil, err
 	}
@@ -103,16 +107,23 @@ func (s *ProblemSetGenerationService) Status(ctx context.Context, id uuid.UUID) 
 		return state, nil
 	}
 	ref := domain.ProblemSetGenerationRef{SetID: id, RunID: state.ID}
-	desc, err := s.temporal.DescribeWorkflowExecution(ctx, setWorkflowID(ref), "")
+	monitorCtx, cancelMonitor := context.WithTimeout(ctx, problemSetRuntimeBudget)
+	defer cancelMonitor()
+	if s.temporal == nil {
+		return s.unknownSetRuntime(monitorCtx, state, "暂时无法确认题集执行状态，已保存的任务和结果会保留。"), nil
+	}
+	describeCtx, cancelDescribe := context.WithTimeout(monitorCtx, problemSetRuntimeRPCTimeout)
+	desc, err := s.temporal.DescribeWorkflowExecution(describeCtx, setWorkflowID(ref), "")
+	cancelDescribe()
 	if err != nil {
 		var missing *serviceerror.NotFound
 		if errors.As(err, &missing) && state.Status == "queued" {
-			return state, nil
+			return s.unknownSetRuntime(monitorCtx, state, "题集需求已保存，但执行服务尚未确认收到任务；可以重新提交启动，原任务编号会保留。"), nil
 		}
-		return nil, fmt.Errorf("generation status unavailable: %w", err)
+		return s.unknownSetRuntime(monitorCtx, state, "暂时无法确认题集执行状态，任务可能仍在执行；稍后刷新查看。"), nil
 	}
-	if desc.WorkflowExecutionInfo == nil {
-		return nil, fmt.Errorf("generation status unavailable")
+	if desc == nil || desc.WorkflowExecutionInfo == nil {
+		return s.unknownSetRuntime(monitorCtx, state, "暂时无法确认题集执行状态，已保存的任务和结果会保留。"), nil
 	}
 	switch desc.WorkflowExecutionInfo.Status {
 	case enumspb.WORKFLOW_EXECUTION_STATUS_FAILED, enumspb.WORKFLOW_EXECUTION_STATUS_TIMED_OUT, enumspb.WORKFLOW_EXECUTION_STATUS_TERMINATED, enumspb.WORKFLOW_EXECUTION_STATUS_CANCELED:
@@ -136,7 +147,13 @@ func (s *ProblemSetGenerationService) Status(ctx context.Context, id uuid.UUID) 
 		}
 		state = set.Generation
 	}
-	return state, nil
+	if !state.Active() {
+		return state, nil
+	}
+	if desc.WorkflowExecutionInfo.Status == enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED {
+		return s.unknownSetRuntime(monitorCtx, state, "执行已结束，但尚未读到题集完成记录；已保存的结果会保留，请刷新查看。"), nil
+	}
+	return s.observeSetRuntime(monitorCtx, state, desc), nil
 }
 func (s *ProblemSetGenerationService) Cancel(ctx context.Context, id uuid.UUID) error {
 	if err := s.sets.requireSetAccess(ctx, id, true); err != nil {

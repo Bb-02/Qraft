@@ -53,7 +53,7 @@ func TestProblemSetQualityPreservesTargetAndEstimatesWithoutDifficultyFailure(t 
 	require.NoError(t, err)
 	require.Equal(t, 1, stored)
 	require.Equal(t, qualitygate.DecisionPass, result.Decision)
-	require.Equal(t, qualitygate.PolicyProblemSetTraining, result.Audit.Policy)
+	require.Equal(t, qualitygate.PolicyProblemSetTrainingV2, result.Audit.Policy)
 	require.NotEmpty(t, result.Audit.Warnings)
 	require.Empty(t, result.Audit.BlockingIssues)
 	require.Equal(t, qualitygate.GateStatusNotConfigured, result.Audit.GateResults[8].Status)
@@ -121,22 +121,22 @@ func TestProblemSetEarlyVerificationFailureRetainsPartialAssetsForRegeneration(t
 	require.Equal(t, 0, h.trace.count("S3StrictReviewerActivityV1"))
 }
 
-func TestProblemSetDedupUnavailableKeepsCompleteCandidateForManualReview(t *testing.T) {
+func TestProblemSetUnconfiguredEmbeddingStillStoresCompleteCandidateWithWarning(t *testing.T) {
 	h := newFixed20HarnessWithOptions(t, 84, fixed20Scenario{}, fixed20HarnessOptions{noEmbedding: true, noHiddenSuite: true})
 	setTrainingProductInput(h, 800)
 	stored := 0
 	h.env.RegisterActivityWithOptions(func(_ context.Context, input activities.StoreS3QualityDraftInputV1) (*activities.StoreS3QualityDraftResultV1, error) {
 		stored++
-		require.NotNil(t, input.Failure)
-		require.Equal(t, qualitygate.GateDedup, input.Failure.BlockedGate)
-		return &activities.StoreS3QualityDraftResultV1{PayloadVersion: activities.StoreS3QualityDraftPayloadVersionV1, ProblemID: uuid.NewString(), Status: domain.ProblemStatusQuarantined, AuditSHA256: input.AuditArtifact.SHA256, TestManifestSHA256: input.TestManifestArtifact.SHA256}, nil
+		require.Nil(t, input.Failure)
+		return &activities.StoreS3QualityDraftResultV1{PayloadVersion: activities.StoreS3QualityDraftPayloadVersionV1, ProblemID: uuid.NewString(), Status: domain.ProblemStatusDraft, AuditSHA256: input.AuditArtifact.SHA256, TestManifestSHA256: input.TestManifestArtifact.SHA256}, nil
 	}, activity.RegisterOptions{Name: "StoreS3QualityDraftActivityV1"})
 	result, err := h.execute(t)
 	require.NoError(t, err)
 	require.Equal(t, 1, stored)
 	require.True(t, problemQualityHasCompleteAssetsV1(result))
 	require.True(t, result.ReviewerInvoked)
-	require.Equal(t, qualitygate.DecisionQuarantine, result.Audit.Decision)
-	require.Equal(t, qualitygate.GateStatusCheckFailed, result.Audit.GateResults[7].Status)
-	require.NotEmpty(t, result.Audit.BlockingIssues, "dependency failure must remain visible after retaining the candidate")
+	require.Equal(t, qualitygate.DecisionPass, result.Audit.Decision)
+	require.Equal(t, qualitygate.GateStatusNotConfigured, result.Audit.GateResults[7].Status)
+	require.Empty(t, result.Audit.BlockingIssues)
+	require.NotEmpty(t, result.Audit.Warnings, "not doing similarity checks must remain visible")
 }

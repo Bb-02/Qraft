@@ -415,7 +415,7 @@ func validateS3ExportAuditPassV1(audit qualitygate.AuditV1, workflowID, revision
 }
 
 func s3OptionalHiddenGateV1(policy string, gate qualitygate.GateResultV1) bool {
-	return policy == qualitygate.PolicyProblemSetTraining && gate.Gate == qualitygate.GateHiddenRegression && gate.Status == qualitygate.GateStatusNotConfigured
+	return qualitygate.PolicyAllowsNotConfiguredGateV1(policy, gate.Gate) && gate.Status == qualitygate.GateStatusNotConfigured
 }
 
 func validateS3ExportPersistedCasesV1(

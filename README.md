@@ -91,7 +91,7 @@ cd Qraft
 make backend-up
 ```
 
-这会生成仅属于本机的凭据、构建服务并启动配置工作区。打开 `http://localhost:18180`，按[账号指南](docs/shared-service-auth.md)初始化管理员，保存模型与去重配置后运行 `make worker-up`。详细前置条件、端口、数据与停止方式见[自部署指南](docs/self-hosting.md)。
+这会生成仅属于本机的凭据、构建服务并启动配置工作区。打开 `http://localhost:18180`，按[账号指南](docs/shared-service-auth.md)初始化管理员，保存出题模型后运行 `make worker-up`。题集生成不强制要求向量服务；相似题去重可按需配置，未配置时会明确提示。详细前置条件、端口、数据与停止方式见[自部署指南](docs/self-hosting.md)。
 
 | 目录 | 内容 |
 |---|---|

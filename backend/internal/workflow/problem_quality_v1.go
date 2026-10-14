@@ -330,7 +330,7 @@ func runProblemQualityRevisionV1(ctx, activityCtx workflow.Context, root Problem
 	policy := ""
 	targetDifficulty := 0
 	if root.Params.IsProblemSetGeneration() {
-		policy = qualitygate.PolicyProblemSetTraining
+		policy = qualitygate.PolicyProblemSetTrainingV2
 		targetDifficulty = root.Params.Difficulty
 		candidate.DifficultyAssessment = &domain.GenerationDifficultyAssessment{Target: targetDifficulty}
 	}
@@ -581,10 +581,10 @@ func runProblemQualityRevisionV1(ctx, activityCtx workflow.Context, root Problem
 	addProblemQualityAssetV1(baseAssets, "boundary_coverage", boundaryRef)
 
 	var dedup activities.S3DedupGateResultV1
-	if err := workflow.ExecuteActivity(activityCtx, "S3DedupGateActivityV1", activities.S3DedupGateInputV1{PayloadVersion: activities.S3QualityPayloadVersionV1, FinalStatementArtifact: finalRef, ExpectedFinalStatementSHA256: finalStatement.FinalBundleSHA256, StatementDraftArtifact: draftRef, ExpectedStatementDraftSHA256: statement.StatementDraftSHA256, ExpectedMarkdownSHA256: finalStatement.MarkdownSHA256}).Get(ctx, &dedup); err != nil {
+	if err := workflow.ExecuteActivity(activityCtx, "S3DedupGateActivityV1", activities.S3DedupGateInputV1{PayloadVersion: activities.S3QualityPayloadVersionV1, Policy: policy, FinalStatementArtifact: finalRef, ExpectedFinalStatementSHA256: finalStatement.FinalBundleSHA256, StatementDraftArtifact: draftRef, ExpectedStatementDraftSHA256: statement.StatementDraftSHA256, ExpectedMarkdownSHA256: finalStatement.MarkdownSHA256}).Get(ctx, &dedup); err != nil {
 		return nil, fmt.Errorf("run S3 dedup gate: %w", err)
 	}
-	pre := qualitygate.PreReviewEvidenceV1{SchemaVersion: qualitygate.PreReviewEvidenceSchemaVersionV1, SubjectID: root.SubjectID, SubjectRevision: finalStatement.FinalBundleSHA256, SpecLint: specLintGate.Gate, SampleOutputBinding: sampleOutputGate.Gate, OracleDifferential: oracleGate.Gate, Sanitizer: sanitizer.Gate, BoundaryCoverage: manifest.BoundaryCoverageGate, TestManifest: manifest.TestManifestGate, Dedup: dedup.Gate}
+	pre := qualitygate.PreReviewEvidenceV1{SchemaVersion: qualitygate.PreReviewEvidenceSchemaVersionV1, Policy: policy, SubjectID: root.SubjectID, SubjectRevision: finalStatement.FinalBundleSHA256, SpecLint: specLintGate.Gate, SampleOutputBinding: sampleOutputGate.Gate, OracleDifferential: oracleGate.Gate, Sanitizer: sanitizer.Gate, BoundaryCoverage: manifest.BoundaryCoverageGate, TestManifest: manifest.TestManifestGate, Dedup: dedup.Gate}
 	shouldReview, err := qualitygate.ShouldInvokeReviewerV1(pre)
 	if err != nil {
 		return nil, temporal.NewNonRetryableApplicationError(fmt.Sprintf("validate S3 pre-review evidence: %v", err), problemQualityContractErrorTypeV1, err)

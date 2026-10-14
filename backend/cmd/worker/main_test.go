@@ -50,7 +50,7 @@ func TestConfigureProviderEffectDependenciesWiresProductionIdentity(t *testing.T
 	}
 }
 
-func TestConfigureProviderEffectDependenciesRejectsDisabledEmbedding(t *testing.T) {
+func TestConfigureProviderEffectDependenciesAllowsDisabledEmbeddingForSets(t *testing.T) {
 	deps := &activities.Dependencies{}
 	cfg := &config.Config{
 		Anthropic: config.AnthropicConfig{Provider: "provider", Model: "llm-model"},
@@ -58,8 +58,11 @@ func TestConfigureProviderEffectDependenciesRejectsDisabledEmbedding(t *testing.
 		Temporal:  config.TemporalConfig{ProviderEffectLease: 30 * time.Minute},
 	}
 	err := configureProviderEffectDependencies(deps, workerProviderEffectStore{}, cfg, uuid.Nil)
-	if err == nil || !strings.Contains(err.Error(), "embedding must be enabled") {
-		t.Fatalf("disabled embedding error = %v", err)
+	if err != nil {
+		t.Fatalf("worker must accept explicitly disabled optional embedding: %v", err)
+	}
+	if deps.EmbeddingEnabled || deps.EmbeddingModelVersionID != uuid.Nil || deps.ProviderEffects == nil {
+		t.Fatalf("disabled embedding was wired as configured: %+v", deps)
 	}
 }
 

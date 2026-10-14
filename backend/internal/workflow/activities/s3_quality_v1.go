@@ -1285,6 +1285,7 @@ type structPlaceholderSemanticSpecV1 struct{}
 
 type S3DedupGateInputV1 struct {
 	PayloadVersion               int         `json:"payload_version"`
+	Policy                       string      `json:"policy,omitempty"`
 	FinalStatementArtifact       ArtifactRef `json:"final_statement_artifact"`
 	ExpectedFinalStatementSHA256 string      `json:"expected_final_statement_sha256"`
 	StatementDraftArtifact       ArtifactRef `json:"statement_draft_artifact"`
@@ -1300,6 +1301,9 @@ type S3DedupGateResultV1 struct {
 }
 
 func (a *Activities) S3DedupGateActivityV1(ctx context.Context, in S3DedupGateInputV1) (*S3DedupGateResultV1, error) {
+	if err := qualitygate.ValidatePolicyV1(in.Policy); err != nil {
+		return nil, s3ContractErrorV1("invalid dedup policy: %v", err)
+	}
 	if in.PayloadVersion != S3QualityPayloadVersionV1 ||
 		!isManifestSHA256(in.ExpectedFinalStatementSHA256) ||
 		!isManifestSHA256(in.ExpectedStatementDraftSHA256) ||
@@ -1340,7 +1344,32 @@ func (a *Activities) S3DedupGateActivityV1(ctx context.Context, in S3DedupGateIn
 		return nil, s3ContractErrorV1("bound statement draft identity mismatch")
 	}
 	statement := StatementResult{Title: draft.Title, Statement: final.Markdown, SourceArtifacts: []*ArtifactRef{&in.FinalStatementArtifact, &in.StatementDraftArtifact}}
-	dedup, dedupErr := a.PostStatementSimilarityActivity(ctx, statement)
+	if (a.deps == nil || !a.deps.EmbeddingEnabled) && qualitygate.PolicyAllowsNotConfiguredGateV1(in.Policy, qualitygate.GateDedup) {
+		receipt := struct {
+			SchemaVersion   string `json:"schema_version"`
+			Policy          string `json:"policy"`
+			Status          string `json:"status"`
+			ReasonCode      string `json:"reason_code"`
+			Message         string `json:"message"`
+			StatementSHA256 string `json:"statement_sha256"`
+		}{"algoforge.s3-dedup-unconfigured.v1", in.Policy, qualitygate.GateStatusNotConfigured, "dedup.embedding_not_configured", "未配置向量服务，本题未进行相似题去重。", in.ExpectedMarkdownSHA256}
+		encoded, err := json.Marshal(receipt)
+		if err != nil {
+			return nil, err
+		}
+		ref, err := a.putS3ReceiptV1(ctx, encoded, "qg08_dedup_receipt")
+		if err != nil {
+			return nil, err
+		}
+		return &S3DedupGateResultV1{PayloadVersion: S3QualityPayloadVersionV1, Gate: qualitygate.DedupEvidenceV1{Status: qualitygate.GateStatusNotConfigured, Evidence: s3EvidenceAssetV1(*ref), Blockers: []qualitygate.ReviewBlockerV1{}}, ReceiptSHA256: ref.SHA256, ReceiptArtifact: ref}, nil
+	}
+	var dedup *PostStatementSimilarityResult
+	var dedupErr error
+	if a.deps == nil || a.deps.Embedding == nil {
+		dedupErr = fmt.Errorf("required statement embedding client is not configured")
+	} else {
+		dedup, dedupErr = a.PostStatementSimilarityActivity(ctx, statement)
+	}
 	if dedupErr != nil {
 		dedup = func() *PostStatementSimilarityResult {
 			value := NewPostStatementDedupCheckFailedResult(statement, dedupErr)
@@ -1633,7 +1662,7 @@ func (a *Activities) S3HiddenRegressionActivityV1(ctx context.Context, in S3Hidd
 	} else if in.Resolution.Suite != nil || in.Resolution.FailureCode != "hidden.suite_unavailable" {
 		return nil, s3ContractErrorV1("unavailable hidden-suite resolution is not minimal")
 	}
-	if !in.Resolution.Available && in.Resolution.NotConfigured && in.Policy == qualitygate.PolicyProblemSetTraining {
+	if !in.Resolution.Available && in.Resolution.NotConfigured && qualitygate.PolicyAllowsNotConfiguredGateV1(in.Policy, qualitygate.GateHiddenRegression) {
 		status = qualitygate.GateStatusNotConfigured
 	}
 	receipt := struct {

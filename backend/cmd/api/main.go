@@ -265,7 +265,14 @@ func main() {
 	problemSetService.SetWorkflowAccess(workflowAccess)
 	problemSetHandler := handler.NewProblemSetHandler(problemSetService)
 	if generationAPIMode.ProductRouteEnabled {
-		problemSetHandler.SetGenerationService(service.NewProblemSetGenerationService(problemSetService, problemSetRepo, problemService, tagRepo, temporalClient, cfg.Temporal.TaskQueue, service.NewProblemSetProviderResolver(llmSettingsHandler, runtimeKeyStore)))
+		setGeneration := service.NewProblemSetGenerationService(problemSetService, problemSetRepo, problemService, tagRepo, temporalClient, cfg.Temporal.TaskQueue, service.NewProblemSetProviderResolver(llmSettingsHandler, runtimeKeyStore))
+		setGeneration.SetRuntimeWarningsResolver(func(context.Context) ([]string, error) {
+			if !cfg.Embedding.Enabled {
+				return []string{"当前未配置向量服务，新生成题目将不做相似题去重；题集内重复内容仍会检查。"}, nil
+			}
+			return nil, nil
+		})
+		problemSetHandler.SetGenerationService(setGeneration)
 	}
 	sourceHandler := handler.NewSourceHandler(sources.NewFetcher())
 	problemImportHandler := handler.NewProblemImportHandler(service.NewProblemImportService(

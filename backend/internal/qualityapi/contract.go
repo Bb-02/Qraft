@@ -15,6 +15,8 @@ import (
 	"slices"
 	"sort"
 	"strings"
+
+	qualitygate "github.com/Gingoo-TvT/Qraft/backend/internal/qualitygate/v1"
 )
 
 const (
@@ -264,7 +266,7 @@ func (report ProblemQualityReportV1) Validate() error {
 	if report.GenerationEvidenceProfile != "minimal" && report.GenerationEvidenceProfile != "standard" && report.GenerationEvidenceProfile != "audit" {
 		return fmt.Errorf("unsupported generation evidence profile %q", report.GenerationEvidenceProfile)
 	}
-	if report.Policy != "" && report.Policy != "problem_set_training" {
+	if err := qualitygate.ValidatePolicyV1(report.Policy); err != nil {
 		return errors.New("quality report policy is unsupported")
 	}
 	if report.Decision != "pass" && report.Decision != "quarantine" {
@@ -284,8 +286,8 @@ func (report ProblemQualityReportV1) Validate() error {
 	}
 	failed := false
 	for index, gate := range report.Gates {
-		optionalHidden := report.Policy == "problem_set_training" && gate.Name == "hidden_regression" && gate.Status == "not_configured"
-		allowed := gate.Status == "pass" || optionalHidden || (report.Decision == "quarantine" && (gate.Status == "blocked" || gate.Status == "check_failed"))
+		optionalGate := qualitygate.PolicyAllowsNotConfiguredGateV1(report.Policy, gate.Name) && gate.Status == qualitygate.GateStatusNotConfigured
+		allowed := gate.Status == "pass" || optionalGate || (report.Decision == "quarantine" && (gate.Status == "blocked" || gate.Status == "check_failed"))
 		if gate.Name != gateOrderV1[index] || !allowed {
 			return fmt.Errorf("quality gate %d is %q/%q", index, gate.Name, gate.Status)
 		}
@@ -294,7 +296,7 @@ func (report ProblemQualityReportV1) Validate() error {
 	if (report.Decision == "quarantine") != failed || (report.Decision == "quarantine") != (len(report.BlockingIssues) > 0) {
 		return errors.New("quality report must retain the original failed gates and findings")
 	}
-	if len(report.Warnings) > 0 && report.Policy != "problem_set_training" {
+	if len(report.Warnings) > 0 && !qualitygate.IsProblemSetTrainingPolicyV1(report.Policy) {
 		return errors.New("advisory warnings require the training policy")
 	}
 	for _, finding := range append(append([]QualityFindingV1(nil), report.Warnings...), report.BlockingIssues...) {
@@ -319,7 +321,7 @@ func (report ProblemQualityReportV1) Validate() error {
 	if err != nil || wantStructural != report.StructuralSignature {
 		return errors.New("structural signature is not canonical")
 	}
-	training := report.Policy == "problem_set_training"
+	training := qualitygate.IsProblemSetTrainingPolicyV1(report.Policy)
 	if report.Difficulty.GenerationTarget <= 0 || (training && report.Difficulty.GenerationTarget > 10000) || (!training && report.Difficulty.GenerationTarget%100 != 0) || report.Difficulty.Calibrated || report.Difficulty.Source != "cas_bound_authoring_plan_generation_target_advisory" {
 		return errors.New("difficulty must remain an uncalibrated CAS-bound generation-target advisory")
 	}

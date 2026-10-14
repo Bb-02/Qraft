@@ -164,6 +164,55 @@ func TestSetBatchPlansAllowIntroductoryAndIntermediateTargets(t *testing.T) {
 	require.Equal(t, params.ProblemSetContext, quality.Params.ProblemSetContext)
 }
 
+func TestSetProblemGenParamsCarriesKnowledgePointContractIntoQualityInput(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tags []string
+		mode string
+		want []string
+	}{
+		{name: "single", tags: []string{"simulation"}, mode: domain.KnowledgePointCombinationSingle, want: []string{"simulation"}},
+		{name: "set", tags: []string{"simulation", "greedy"}, mode: domain.KnowledgePointCombinationSet, want: []string{"greedy", "simulation"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			slot := domain.ProblemSetGenerationSlot{Position: 1, Level: domain.LevelAlgorithm, Difficulty: 400, Tags: append([]string(nil), tc.tags...)}
+			params := setProblemGenParams(domain.ProblemSetGenerationRef{SetID: uuid.New()}, slot, nil, "合成基础训练题")
+			require.Equal(t, tc.tags, slot.Tags, "canonical ordering must not mutate the stored slot")
+			require.Equal(t, tc.want, params.Tags)
+			require.ElementsMatch(t, tc.tags, params.Tags, "the requested knowledge points must remain unchanged")
+			require.Equal(t, &domain.KnowledgePointCombinationContract{SchemaVersion: domain.KnowledgePointCombinationSchemaV1, Mode: tc.mode, MaxConcepts: len(tc.tags)}, params.KnowledgePointCombination)
+			require.NoError(t, params.Validate())
+			quality, err := generationJobQualityInput(generationapi.JobIDPrefix+strings.Repeat("b", 64), params)
+			require.NoError(t, err)
+			require.Equal(t, params.KnowledgePointCombination, quality.Params.KnowledgePointCombination)
+			require.Equal(t, tc.want, quality.Params.Tags)
+			require.NoError(t, quality.Params.KnowledgePointCombination.Validate(quality.Params.Tags))
+		})
+	}
+}
+
+func TestSetProblemGenParamsDoesNotHideInvalidKnowledgePointSlugs(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tags []string
+		want string
+	}{
+		{name: "duplicate", tags: []string{"simulation", "simulation"}, want: "duplicate"},
+		{name: "normalized duplicate", tags: []string{"simulation", " Simulation "}, want: "duplicate"},
+		{name: "empty value", tags: []string{"simulation", ""}, want: "empty value"},
+		{name: "missing knowledge points", tags: nil, want: "at least one slug"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			params := setProblemGenParams(domain.ProblemSetGenerationRef{SetID: uuid.New()}, domain.ProblemSetGenerationSlot{Position: 1, Level: domain.LevelAlgorithm, Difficulty: 400, Tags: tc.tags}, nil, "合成基础训练题")
+			require.Equal(t, tc.tags, params.Tags)
+			require.Equal(t, len(tc.tags), params.KnowledgePointCombination.MaxConcepts)
+			require.ErrorContains(t, params.Validate(), tc.want)
+			_, err := generationJobQualityInput(generationapi.JobIDPrefix+strings.Repeat("c", 64), params)
+			require.ErrorContains(t, err, tc.want)
+		})
+	}
+}
+
 func TestSetPlanningFailuresLeaveValidNeighborsAndRetryReplansOnlyFailures(t *testing.T) {
 	catalog := []domain.TagCategory{{TagName: "simulation", Level: domain.LevelAlgorithm, MinDifficulty: 800, MaxDifficulty: 1400}}
 	plans := []setPlanEntry{

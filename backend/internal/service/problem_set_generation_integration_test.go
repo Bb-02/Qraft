@@ -31,7 +31,7 @@ func (f *setIntroductoryPlanningFixture) CompleteWithRetry(_ context.Context, _ 
 	if f.calls > 1 {
 		raw, _ := json.Marshal([]setPlanEntry{
 			{Position: 1, Type: domain.QuizTypeProgramming, Title: "无效合成目标", Brief: "这是一个完整的合成规划任务，故意填入不合法难度以检查其他题位仍可继续。", Tags: []string{"simulation"}, Level: domain.LevelAlgorithm, Difficulty: 0},
-			{Position: 2, Type: domain.QuizTypeProgramming, Title: "基础合成模拟", Brief: "给出完整的整数操作规则，通过直接模拟得到输出，保留用户要求的低难度目标。", Tags: []string{"simulation"}, Level: domain.LevelAlgorithm, Difficulty: 400},
+			{Position: 2, Type: domain.QuizTypeProgramming, Title: "基础合成模拟", Brief: "给出完整的整数操作规则，通过直接模拟得到输出，保留用户要求的低难度目标。", Tags: []string{"simulation", "greedy"}, Level: domain.LevelAlgorithm, Difficulty: 400},
 		})
 		text = string(raw)
 	}
@@ -74,12 +74,16 @@ func TestProblemSetPreparationIsolatesInvalidTargetsIntegration(t *testing.T) {
 	require.Equal(t, 400, batch.Slots[0].Programming.Params.Difficulty)
 	require.Equal(t, set.ID, batch.Slots[0].Programming.Params.ProblemSetContext.SetID)
 	require.NoError(t, batch.Slots[0].Programming.Params.Validate())
+	require.Equal(t, []string{"greedy", "simulation"}, batch.Slots[0].Programming.Params.Tags)
+	require.Equal(t, &domain.KnowledgePointCombinationContract{SchemaVersion: domain.KnowledgePointCombinationSchemaV1, Mode: domain.KnowledgePointCombinationSet, MaxConcepts: 2}, batch.Slots[0].Programming.Params.KnowledgePointCombination)
+	require.NoError(t, batch.Slots[0].Programming.Params.KnowledgePointCombination.Validate(batch.Slots[0].Programming.Params.Tags))
 	stored, err := sets.Get(ctx, set.ID)
 	require.NoError(t, err)
 	require.Equal(t, "failed", stored.Generation.Slots[0].Status)
 	require.Contains(t, stored.Generation.Slots[0].Error, "训练目标难度")
 	require.Empty(t, stored.Generation.Slots[0].Brief, "retry must replan invalid slot")
 	require.Equal(t, "ready", stored.Generation.Slots[1].Status)
+	require.Equal(t, []string{"simulation", "greedy"}, stored.Generation.Slots[1].Tags, "quality input canonicalization must preserve the stored plan")
 	require.Equal(t, 2, model.calls, "content failure must not regenerate the complete batch")
 }
 

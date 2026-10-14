@@ -9,7 +9,7 @@ help:
 	@echo "  make build       Build server images"
 	@echo "  make desktop     Build the bundled Windows interface"
 	@echo "  make backend-up  Start a local configuration workspace and sandbox"
-	@echo "  make worker-up   Apply saved embedding settings and start generation"
+	@echo "  make worker-up   Start generation (embedding is optional for sets)"
 	@echo "  make stop        Stop this Compose project, preserving volumes"
 setup:
 	python3 scripts/configure.py
@@ -30,7 +30,9 @@ backend-up: build
 	python3 scripts/configure.py --bind-sandbox
 	$(COMPOSE) up -d --wait --wait-timeout 360 caddy sandbox
 worker-up:
+ifneq ($(strip $(MODEL_VERSION_ID)),)
 	python3 scripts/configure.py --saved-embedding http://localhost:$$(sed -n 's/^HTTP_PORT=//p' .env) --model-version-id "$(MODEL_VERSION_ID)"
+endif
 	$(COMPOSE) up -d --wait --wait-timeout 360 api worker
 stop:
 	$(COMPOSE) stop

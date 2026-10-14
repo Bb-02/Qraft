@@ -83,13 +83,13 @@ func TestS3TrainingMaterializationRejectsMixedPolicyAndRuleHashes(t *testing.T) 
 
 func TestS3TrainingStoreParametersRetainRequestedTargetAndContext(t *testing.T) {
 	params := domain.DefaultProblemGenParams()
-	if policy := s3QualityPolicyForParamsV1(params); policy != "" {
-		t.Fatalf("ordinary authoring gained policy %q", policy)
+	if !s3QualityPolicyMatchesParamsV1("", params) || s3QualityPolicyMatchesParamsV1(qualitygate.PolicyProblemSetTrainingV2, params) {
+		t.Fatal("ordinary authoring accepted a set policy")
 	}
 	params.Difficulty = 125
 	params.ProblemSetContext = &domain.ProblemSetGenerationContext{SetID: uuid.New(), Position: 1}
-	if policy := s3QualityPolicyForParamsV1(params); policy != qualitygate.PolicyProblemSetTraining {
-		t.Fatalf("set authoring lost its explicit policy: %q", policy)
+	if !s3QualityPolicyMatchesParamsV1(qualitygate.PolicyProblemSetTraining, params) || !s3QualityPolicyMatchesParamsV1(qualitygate.PolicyProblemSetTrainingV2, params) || s3QualityPolicyMatchesParamsV1("", params) {
+		t.Fatal("set authoring lost its explicit versioned policy binding")
 	}
 	stored := s3QualityDraftStoreParamsV1(params, generationapi.EvidenceMinimal)
 	if stored.Difficulty != 125 || !stored.IsProblemSetGeneration() || *stored.ProblemSetContext != *params.ProblemSetContext {

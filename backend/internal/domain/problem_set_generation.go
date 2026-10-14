@@ -64,15 +64,16 @@ type ProblemSetGenerationRef struct {
 	RunID string    `json:"run_id"`
 }
 type ProblemSetGenerationState struct {
-	ID                string                     `json:"id"`
-	Status            string                     `json:"status"`
-	ConfigFingerprint string                     `json:"config_fingerprint"`
-	Brief             string                     `json:"brief,omitempty"`
-	Slots             []ProblemSetGenerationSlot `json:"slots"`
-	Error             string                     `json:"error,omitempty"`
-	Failure           *GenerationFailure         `json:"failure,omitempty"`
-	StartedAt         time.Time                  `json:"started_at"`
-	UpdatedAt         time.Time                  `json:"updated_at"`
+	ID                string                       `json:"id"`
+	Status            string                       `json:"status"`
+	ConfigFingerprint string                       `json:"config_fingerprint"`
+	Brief             string                       `json:"brief,omitempty"`
+	Slots             []ProblemSetGenerationSlot   `json:"slots"`
+	Error             string                       `json:"error,omitempty"`
+	Failure           *GenerationFailure           `json:"failure,omitempty"`
+	Runtime           *ProblemSetGenerationRuntime `json:"runtime,omitempty"`
+	StartedAt         time.Time                    `json:"started_at"`
+	UpdatedAt         time.Time                    `json:"updated_at"`
 }
 
 func (s *ProblemSetGenerationState) Active() bool {
@@ -107,4 +108,28 @@ type ProblemSetGenerationSlot struct {
 	Error                string                          `json:"error,omitempty"`
 	Failure              *GenerationFailure              `json:"failure,omitempty"`
 	DifficultyAssessment *GenerationDifficultyAssessment `json:"difficulty_assessment,omitempty"`
+	Execution            *ProblemSetSlotExecution        `json:"execution,omitempty"`
+}
+
+// Runtime observations are response-only; they never change the durable run.
+type ProblemSetGenerationRuntime struct {
+	State             string     `json:"state"`
+	Message           string     `json:"message"`
+	ElapsedSeconds    int64      `json:"elapsed_seconds"`
+	Activity          string     `json:"activity,omitempty"`
+	ActivityStartedAt *time.Time `json:"activity_started_at,omitempty"`
+	Attempt           int32      `json:"attempt,omitempty"`
+	LastHeartbeatAt   *time.Time `json:"last_heartbeat_at,omitempty"`
+	Warnings          []string   `json:"warnings,omitempty"`
+}
+
+type ProblemSetSlotExecution struct {
+	State             string     `json:"state"`
+	Stage             string     `json:"stage"`
+	Message           string     `json:"message"`
+	ElapsedSeconds    int64      `json:"elapsed_seconds"`
+	Activity          string     `json:"activity,omitempty"`
+	ActivityStartedAt *time.Time `json:"activity_started_at,omitempty"`
+	Attempt           int32      `json:"attempt,omitempty"`
+	LastHeartbeatAt   *time.Time `json:"last_heartbeat_at,omitempty"`
 }

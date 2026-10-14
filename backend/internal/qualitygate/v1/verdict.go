@@ -20,7 +20,8 @@ const (
 	GateStatusCheckFailed   = "check_failed"
 	GateStatusNotConfigured = "not_configured"
 
-	PolicyProblemSetTraining = "problem_set_training"
+	PolicyProblemSetTraining   = "problem_set_training"
+	PolicyProblemSetTrainingV2 = "problem_set_training_v2"
 
 	DecisionPass       = "pass"
 	DecisionQuarantine = "quarantine"
@@ -110,6 +111,7 @@ type S3EvidenceV1 struct {
 // first manufacturing or calling a reviewer assessment.
 type PreReviewEvidenceV1 struct {
 	SchemaVersion       string          `json:"schema_version"`
+	Policy              string          `json:"policy,omitempty"`
 	SubjectID           string          `json:"subject_id"`
 	SubjectRevision     string          `json:"subject_revision"`
 	SpecLint            GateEvidenceV1  `json:"spec_lint"`
@@ -165,13 +167,23 @@ type ruleDescriptorV1 struct {
 	Policy                         string   `json:"policy,omitempty"`
 	DifficultyCalibrationAdvisory  bool     `json:"difficulty_calibration_advisory,omitempty"`
 	UnconfiguredHiddenOptional     bool     `json:"unconfigured_hidden_optional,omitempty"`
+	UnconfiguredDedupOptional      bool     `json:"unconfigured_dedup_optional,omitempty"`
 }
 
 func ValidatePolicyV1(policy string) error {
-	if policy != "" && policy != PolicyProblemSetTraining {
+	if policy != "" && !IsProblemSetTrainingPolicyV1(policy) {
 		return fmt.Errorf("unsupported S3 quality policy %q", policy)
 	}
 	return nil
+}
+
+func IsProblemSetTrainingPolicyV1(policy string) bool {
+	return policy == PolicyProblemSetTraining || policy == PolicyProblemSetTrainingV2
+}
+
+func PolicyAllowsNotConfiguredGateV1(policy, gate string) bool {
+	return (gate == GateHiddenRegression && IsProblemSetTrainingPolicyV1(policy)) ||
+		(gate == GateDedup && policy == PolicyProblemSetTrainingV2)
 }
 
 func (asset EvidenceAssetV1) Validate() error {
@@ -277,11 +289,11 @@ func (evidence S3EvidenceV1) Validate() error {
 	if evidence.Reviewer.AssessmentSHA256 != assessmentSHA {
 		return fmt.Errorf("reviewer assessment_sha256 %q does not match canonical assessment %q", evidence.Reviewer.AssessmentSHA256, assessmentSHA)
 	}
-	if err := validateDedupEvidenceV1(evidence.Dedup); err != nil {
+	if err := validateDedupEvidenceForPolicyV1(evidence.Dedup, evidence.Policy); err != nil {
 		return err
 	}
 	if evidence.HiddenRegression.Status == GateStatusNotConfigured {
-		if evidence.Policy != PolicyProblemSetTraining || len(evidence.HiddenRegression.Blockers) != 0 || evidence.HiddenRegression.ExposureDetected {
+		if !PolicyAllowsNotConfiguredGateV1(evidence.Policy, GateHiddenRegression) || len(evidence.HiddenRegression.Blockers) != 0 || evidence.HiddenRegression.ExposureDetected {
 			return errors.New("only a training policy may omit an unconfigured hidden regression without blockers or exposure")
 		}
 	} else {
@@ -302,7 +314,15 @@ func (evidence S3EvidenceV1) Validate() error {
 }
 
 func validateDedupEvidenceV1(evidence DedupEvidenceV1) error {
-	if err := validateGateStatusV1(evidence.Status); err != nil {
+	return validateDedupEvidenceForPolicyV1(evidence, "")
+}
+
+func validateDedupEvidenceForPolicyV1(evidence DedupEvidenceV1, policy string) error {
+	if evidence.Status == GateStatusNotConfigured {
+		if !PolicyAllowsNotConfiguredGateV1(policy, GateDedup) || len(evidence.Blockers) != 0 {
+			return errors.New("unconfigured dedup is optional only under training policy v2 without blockers")
+		}
+	} else if err := validateGateStatusV1(evidence.Status); err != nil {
 		return fmt.Errorf("dedup: %w", err)
 	}
 	if err := evidence.Evidence.Validate(); err != nil {
@@ -314,9 +334,9 @@ func validateDedupEvidenceV1(evidence DedupEvidenceV1) error {
 	if err := validateGateBlockersV1(GateDedup, evidence.Status, evidence.Blockers); err != nil {
 		return err
 	}
-	if evidence.Status == GateStatusCheckFailed {
+	if evidence.Status == GateStatusCheckFailed || evidence.Status == GateStatusNotConfigured {
 		if evidence.NeighborCount != nil {
-			return errors.New("dedup check_failed must not expose a neighbor_count")
+			return errors.New("unexecuted dedup must not expose a neighbor_count")
 		}
 	} else if evidence.NeighborCount == nil || *evidence.NeighborCount < 0 {
 		return errors.New("successful dedup check requires a non-negative neighbor_count")
@@ -327,6 +347,9 @@ func validateDedupEvidenceV1(evidence DedupEvidenceV1) error {
 // ShouldInvokeReviewerV1 is the pre-LLM short-circuit used by the true-defect
 // replay. Gates 1-6 and dedup are deterministic prerequisites for reviewer use.
 func ShouldInvokeReviewerV1(evidence PreReviewEvidenceV1) (bool, error) {
+	if err := ValidatePolicyV1(evidence.Policy); err != nil {
+		return false, err
+	}
 	if evidence.SchemaVersion != PreReviewEvidenceSchemaVersionV1 {
 		return false, fmt.Errorf("pre-review schema_version %q, want %q", evidence.SchemaVersion, PreReviewEvidenceSchemaVersionV1)
 	}
@@ -351,15 +374,16 @@ func ShouldInvokeReviewerV1(evidence PreReviewEvidenceV1) (bool, error) {
 			return false, nil
 		}
 	}
-	if err := validateDedupEvidenceV1(evidence.Dedup); err != nil {
+	if err := validateDedupEvidenceForPolicyV1(evidence.Dedup, evidence.Policy); err != nil {
 		return false, err
 	}
-	return evidence.Dedup.Status == GateStatusPass, nil
+	return evidence.Dedup.Status == GateStatusPass || (evidence.Dedup.Status == GateStatusNotConfigured && PolicyAllowsNotConfiguredGateV1(evidence.Policy, GateDedup)), nil
 }
 
 func PreReviewEvidenceFromS3V1(evidence S3EvidenceV1) PreReviewEvidenceV1 {
 	return PreReviewEvidenceV1{
 		SchemaVersion:       PreReviewEvidenceSchemaVersionV1,
+		Policy:              evidence.Policy,
 		SubjectID:           evidence.SubjectID,
 		SubjectRevision:     evidence.SubjectRevision,
 		SpecLint:            evidence.SpecLint,
@@ -408,7 +432,7 @@ func RecomputeVerdictV1(evidence S3EvidenceV1) (AuditV1, error) {
 
 	reviewerIssues := reviewerIssuesV1(evidence.Reviewer)
 	warnings := []BlockingIssueV1{}
-	if evidence.Policy == PolicyProblemSetTraining {
+	if IsProblemSetTrainingPolicyV1(evidence.Policy) {
 		blocking := make([]BlockingIssueV1, 0, len(reviewerIssues))
 		for _, issue := range reviewerIssues {
 			if isTrainingDifficultyIssueV1(issue.Code) {
@@ -428,7 +452,9 @@ func RecomputeVerdictV1(evidence S3EvidenceV1) (AuditV1, error) {
 	gateResults = append(gateResults, GateResultV1{Gate: GateReviewerSchemaVerdict, Status: reviewerStatus})
 
 	gateResults = append(gateResults, GateResultV1{Gate: GateDedup, Status: evidence.Dedup.Status})
-	if evidence.Dedup.Status != GateStatusPass {
+	if evidence.Dedup.Status == GateStatusNotConfigured {
+		warnings = append(warnings, BlockingIssueV1{Source: IssueSourceDeterministic, Gate: GateDedup, Code: "dedup.not_configured", ResponsibleAsset: evidence.Dedup.Evidence.Ref, Witness: serverWitnessV1(evidence.Dedup.Evidence.Ref, "未配置向量服务，本题未进行相似题去重；建议发布前人工检查题目重复情况。")})
+	} else if evidence.Dedup.Status != GateStatusPass {
 		deterministicPassed = false
 		issues = append(issues, issuesForGateV1(GateDedup, evidence.Dedup.Status, evidence.Dedup.Evidence, evidence.Dedup.Blockers)...)
 	}
@@ -507,10 +533,13 @@ func CanonicalRuleForPolicyV1(policy string) ([]byte, string, error) {
 		DeterministicBlockersTakeFirst: true,
 		MaxRepairRounds:                MaxRepairRoundsV1,
 	}
-	if policy == PolicyProblemSetTraining {
+	if IsProblemSetTrainingPolicyV1(policy) {
 		descriptor.Policy = policy
 		descriptor.DifficultyCalibrationAdvisory = true
 		descriptor.UnconfiguredHiddenOptional = true
+	}
+	if policy == PolicyProblemSetTrainingV2 {
+		descriptor.UnconfiguredDedupOptional = true
 	}
 	encoded, err := json.Marshal(descriptor)
 	if err != nil {

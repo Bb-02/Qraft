@@ -115,16 +115,16 @@ func main() {
 	embeddingSettingsRepo := repository.NewEmbeddingProviderSettingsRepository(dbPool)
 	embeddingKeyResolver := embeddingruntime.NewAPIKeyResolver(embeddingSettingsRepo, settingsCipher, cfg.Embedding)
 
-	// Problem storage requires an embedding, so disabled embedding is rejected
-	// by the worker preflight before any infrastructure clients are created.
-	embedder, err := llm.NewEmbeddingClientWithResolver(cfg.Embedding, embeddingKeyResolver)
-	if err != nil {
-		log.Fatal().Err(err).Msg("failed to create embedding client")
+	var embedder llm.Embedder
+	if cfg.Embedding.Enabled {
+		embedder, err = llm.NewEmbeddingClientWithResolver(cfg.Embedding, embeddingKeyResolver)
+		if err != nil {
+			log.Fatal().Err(err).Msg("failed to create embedding client")
+		}
+		log.Info().Str("model", cfg.Embedding.Model).Int("dimensions", cfg.Embedding.Dimensions).Msg("embedding client created")
+	} else {
+		log.Warn().Msg("embedding is not configured; problem sets can generate with a visible similarity-check warning")
 	}
-	log.Info().
-		Str("model", cfg.Embedding.Model).
-		Int("dimensions", cfg.Embedding.Dimensions).
-		Msg("embedding client created")
 
 	// Create Temporal client.
 	temporalClient, err := client.Dial(client.Options{
@@ -148,24 +148,29 @@ func main() {
 	providerEffects := repository.NewProviderEffectRepository(dbPool)
 	outboxRepo := repository.NewOutboxRepository(dbPool)
 	provenanceRecorder := repository.NewProvenanceArtifactRepository(dbPool)
-	configuredStatementModel, err := vectorRepo.ResolveConfiguredModelVersion(
-		context.Background(),
-		cfg.Embedding.ExpectedStatementModelVersionID,
-		cfg.Embedding.ProviderID(),
-		cfg.Embedding.Model,
-		cfg.Embedding.Dimensions,
-	)
-	if err != nil {
-		log.Fatal().Err(err).Msg("configured statement embedding preflight failed")
-	}
-	runtimeVectorRepo, err := vectorRepo.BindStatementModelVersion(configuredStatementModel.ID)
-	if err != nil {
-		log.Fatal().Err(err).Msg("failed to bind configured statement embedding model")
-	}
-	if activeID, activeErr := vectorRepo.ActiveModelVersion(context.Background(), repository.EmbeddingKindStatement); activeErr != nil {
-		log.Warn().Err(activeErr).Msg("statement embedding active pointer could not be read")
-	} else if activeID != configuredStatementModel.ID {
-		log.Warn().Str("configured_model_version_id", configuredStatementModel.ID.String()).Str("active_model_version_id", activeID.String()).Msg("statement embedding config and active pointer differ; runtime remains pinned to configuration")
+	statementModelVersionID := uuid.Nil
+	runtimeVectorRepo := vectorRepo
+	if cfg.Embedding.Enabled {
+		configuredStatementModel, err := vectorRepo.ResolveConfiguredModelVersion(
+			context.Background(),
+			cfg.Embedding.ExpectedStatementModelVersionID,
+			cfg.Embedding.ProviderID(),
+			cfg.Embedding.Model,
+			cfg.Embedding.Dimensions,
+		)
+		if err != nil {
+			log.Fatal().Err(err).Msg("configured statement embedding preflight failed")
+		}
+		runtimeVectorRepo, err = vectorRepo.BindStatementModelVersion(configuredStatementModel.ID)
+		if err != nil {
+			log.Fatal().Err(err).Msg("failed to bind configured statement embedding model")
+		}
+		if activeID, activeErr := vectorRepo.ActiveModelVersion(context.Background(), repository.EmbeddingKindStatement); activeErr != nil {
+			log.Warn().Err(activeErr).Msg("statement embedding active pointer could not be read")
+		} else if activeID != configuredStatementModel.ID {
+			log.Warn().Str("configured_model_version_id", configuredStatementModel.ID.String()).Str("active_model_version_id", activeID.String()).Msg("statement embedding config and active pointer differ; runtime remains pinned to configuration")
+		}
+		statementModelVersionID = configuredStatementModel.ID
 	}
 
 	var outboxPublisher outbox.Publisher
@@ -240,7 +245,7 @@ func main() {
 		ProvenanceRecorder: provenanceRecorder,
 		SandboxCfg:         cfg.Sandbox,
 	}
-	if err := configureProviderEffectDependencies(actDeps, providerEffects, cfg, configuredStatementModel.ID); err != nil {
+	if err := configureProviderEffectDependencies(actDeps, providerEffects, cfg, statementModelVersionID); err != nil {
 		log.Fatal().Err(err).Msg("provider effect dependency preflight failed")
 	}
 	if err := configureS3QualityDependencies(actDeps, cfg.App.DevMode); err != nil {
@@ -461,9 +466,6 @@ func configureProviderEffectDependencies(
 func validateWorkerConfiguration(cfg *config.Config) error {
 	if cfg == nil {
 		return fmt.Errorf("worker config is required")
-	}
-	if !cfg.Embedding.Enabled {
-		return fmt.Errorf("embedding must be enabled because StoreProblemActivity requires a durable problem embedding")
 	}
 	return nil
 }

@@ -45,11 +45,21 @@ func TestS3QualityDraftTestCasesLeaveLegacyGroupAndScoreZero(t *testing.T) {
 	}
 }
 
-func TestBuildS3QualityDraftStoreInputV1MaterializesCanonicalCASWithoutLegacyScoring(t *testing.T) {
+type s3QualityDraftMaterializationFixture struct {
+	ctx        context.Context
+	store      *oracleMemoryArtifactStore
+	activities *Activities
+	input      StoreS3QualityDraftInputV1
+	inputRefs  []ArtifactRef
+	auditBytes []byte
+	put        func([]byte, string, string) ArtifactRef
+}
+
+func newS3QualityDraftMaterializationFixture(t *testing.T, workflowID string) *s3QualityDraftMaterializationFixture {
+	t.Helper()
 	ctx := context.Background()
 	store := newOracleMemoryArtifactStore()
 	activities := &Activities{artifacts: store}
-	workflowID := generationapi.JobIDPrefix + strings.Repeat("6", 64)
 	put := func(data []byte, contentType, producer string) ArtifactRef {
 		t.Helper()
 		ref, err := store.Put(ctx, data, contentType, ArtifactMetadata{
@@ -196,6 +206,8 @@ func TestBuildS3QualityDraftStoreInputV1MaterializesCanonicalCASWithoutLegacySco
 	auditRef := put(auditBytes, "application/json", "RecomputeS3VerdictActivityV1")
 
 	params := domain.DefaultProblemGenParams()
+	params.Tags = []string{"simulation"}
+	params.KnowledgePointCombination = &domain.KnowledgePointCombinationContract{SchemaVersion: domain.KnowledgePointCombinationSchemaV1, Mode: domain.KnowledgePointCombinationSingle, MaxConcepts: 1}
 	params.TimeLimit = 1500
 	params.MemoryLimit = 192
 	params.TestDataConfig = domain.TestDataConfig{
@@ -210,6 +222,12 @@ func TestBuildS3QualityDraftStoreInputV1MaterializesCanonicalCASWithoutLegacySco
 		MainProgramArtifact: mainRef, OracleProgramArtifact: oracleRef, OracleReceiptArtifact: oracleReceiptRef,
 		TestManifestArtifact: manifestRef, AuditArtifact: auditRef,
 	}
+	return &s3QualityDraftMaterializationFixture{ctx: ctx, store: store, activities: activities, input: materializerInput, inputRefs: inputRefs, auditBytes: auditBytes, put: put}
+}
+
+func TestBuildS3QualityDraftStoreInputV1MaterializesCanonicalCASWithoutLegacyScoring(t *testing.T) {
+	fixture := newS3QualityDraftMaterializationFixture(t, generationapi.JobIDPrefix+strings.Repeat("6", 64))
+	ctx, activities, materializerInput, inputRefs, auditBytes, put := fixture.ctx, fixture.activities, fixture.input, fixture.inputRefs, fixture.auditBytes, fixture.put
 	storeInput, err := activities.buildS3QualityDraftStoreInputV1(ctx, materializerInput)
 	if err != nil {
 		t.Fatalf("buildS3QualityDraftStoreInputV1: %v", err)

@@ -250,6 +250,9 @@ func (a *Activities) StoreProblemActivity(ctx context.Context, input StoreInput)
 	if len(input.SourceArtifacts) > 0 {
 		meta["source_artifacts"] = input.SourceArtifacts
 	}
+	if a.optionalSetEmbeddingV2(input) {
+		meta["vector_index"] = map[string]interface{}{"status": "not_configured", "message": "未配置向量服务，未执行相似题去重，也未建立题目向量索引。"}
+	}
 	if len(input.DedupReports) > 0 {
 		meta["dedup_reports"] = input.DedupReports
 	}
@@ -517,62 +520,64 @@ func (a *Activities) StoreProblemActivity(ctx context.Context, input StoreInput)
 	// 5. Generate and store embedding
 	// -----------------------------------------------------------------------
 
-	activity.RecordHeartbeat(ctx, "generating and storing embedding")
+	if !a.optionalSetEmbeddingV2(input) {
+		activity.RecordHeartbeat(ctx, "generating and storing embedding")
 
-	embeddingModelVersionID, err := a.deps.configuredStatementModelVersion()
-	if err != nil {
-		return nil, fmt.Errorf("resolving configured statement embedding model: %w", err)
-	}
-	embeddingText := buildEmbeddingText(problem.Title, problem.Statement, problem.OneLineHint)
-	embeddingContentHash := sha256Bytes([]byte(embeddingText))
-	var embedding []float32
-	if isVersioned {
-		effectKey, keyErr := namedProviderEffectKey("store-problem-embedding", input.IdempotencyKey)
-		if keyErr != nil {
-			return nil, keyErr
-		}
-		embedding, err = a.cachedProblemEmbedding(ctx, effectKey, embeddingText)
-	} else {
-		embedding, err = a.deps.Embedding.Embed(ctx, embeddingText)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("generating required problem embedding: %w", err)
-	} else {
-		embeddingHash, err := sha256JSON(embedding)
+		embeddingModelVersionID, err := a.deps.configuredStatementModelVersion()
 		if err != nil {
-			return nil, fmt.Errorf("hashing required problem embedding: %w", err)
+			return nil, fmt.Errorf("resolving configured statement embedding model: %w", err)
 		}
-		embeddingAssignmentHash, err := sha256JSON(struct {
-			ModelVersionID string `json:"model_version_id"`
-			ContentHash    string `json:"content_hash"`
-			EmbeddingSHA   string `json:"embedding_sha256"`
-		}{
-			ModelVersionID: embeddingModelVersionID.String(),
-			ContentHash:    embeddingContentHash,
-			EmbeddingSHA:   embeddingHash,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("hashing required problem embedding assignment: %w", err)
-		}
-		storeVector := func() error {
-			return a.deps.VectorRepo.UpdateEmbeddingForVersion(ctx, repository.EmbeddingWrite{
-				ProblemID:      problemID,
-				ModelVersionID: embeddingModelVersionID,
-				Kind:           repository.EmbeddingKindStatement,
-				ContentHash:    embeddingContentHash,
-				Embedding:      embedding,
-			})
-		}
+		embeddingText := buildEmbeddingText(problem.Title, problem.Statement, problem.OneLineHint)
+		embeddingContentHash := sha256Bytes([]byte(embeddingText))
+		var embedding []float32
 		if isVersioned {
-			err = a.runOperationStep(ctx, input.IdempotencyKey, "vector:problem_embeddings", embeddingAssignmentHash, storeVector)
+			effectKey, keyErr := namedProviderEffectKey("store-problem-embedding", input.IdempotencyKey)
+			if keyErr != nil {
+				return nil, keyErr
+			}
+			embedding, err = a.cachedProblemEmbedding(ctx, effectKey, embeddingText)
 		} else {
-			err = storeVector()
+			embedding, err = a.deps.Embedding.Embed(ctx, embeddingText)
 		}
 		if err != nil {
-			return nil, fmt.Errorf("storing required problem embedding: %w", err)
+			return nil, fmt.Errorf("generating required problem embedding: %w", err)
+		} else {
+			embeddingHash, err := sha256JSON(embedding)
+			if err != nil {
+				return nil, fmt.Errorf("hashing required problem embedding: %w", err)
+			}
+			embeddingAssignmentHash, err := sha256JSON(struct {
+				ModelVersionID string `json:"model_version_id"`
+				ContentHash    string `json:"content_hash"`
+				EmbeddingSHA   string `json:"embedding_sha256"`
+			}{
+				ModelVersionID: embeddingModelVersionID.String(),
+				ContentHash:    embeddingContentHash,
+				EmbeddingSHA:   embeddingHash,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("hashing required problem embedding assignment: %w", err)
+			}
+			storeVector := func() error {
+				return a.deps.VectorRepo.UpdateEmbeddingForVersion(ctx, repository.EmbeddingWrite{
+					ProblemID:      problemID,
+					ModelVersionID: embeddingModelVersionID,
+					Kind:           repository.EmbeddingKindStatement,
+					ContentHash:    embeddingContentHash,
+					Embedding:      embedding,
+				})
+			}
+			if isVersioned {
+				err = a.runOperationStep(ctx, input.IdempotencyKey, "vector:problem_embeddings", embeddingAssignmentHash, storeVector)
+			} else {
+				err = storeVector()
+			}
+			if err != nil {
+				return nil, fmt.Errorf("storing required problem embedding: %w", err)
+			}
 		}
-	}
 
+	}
 	publicationOperationKey := input.IdempotencyKey
 	if publicationOperationKey == "" {
 		publicationOperationKey = "legacy-store-problem:" + problemID.String()

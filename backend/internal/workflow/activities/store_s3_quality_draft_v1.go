@@ -149,7 +149,7 @@ func (a *Activities) buildS3QualityDraftStoreInputV1(ctx context.Context, in Sto
 	if err := validateS3MaterializationAuditV1(audit, in.WorkflowID, in.SubjectRevision, in.Params.IsProblemSetGeneration() && in.Failure != nil); err != nil {
 		return nil, err
 	}
-	if audit.Policy != s3QualityPolicyForParamsV1(in.Params) {
+	if !s3QualityPolicyMatchesParamsV1(audit.Policy, in.Params) {
 		return nil, fmt.Errorf("quality policy does not match the server-owned authoring context")
 	}
 
@@ -301,8 +301,8 @@ func validateS3QualityPassAuditV1(audit qualitygate.AuditV1, workflowID, revisio
 		return fmt.Errorf("quality audit is not a complete nine-gate PASS")
 	}
 	for index, gate := range audit.GateResults {
-		optionalHidden := audit.Policy == qualitygate.PolicyProblemSetTraining && gate.Gate == qualitygate.GateHiddenRegression && gate.Status == qualitygate.GateStatusNotConfigured
-		if gate.Gate != want[index] || (gate.Status != qualitygate.GateStatusPass && !optionalHidden) {
+		optionalGate := qualitygate.PolicyAllowsNotConfiguredGateV1(audit.Policy, gate.Gate) && gate.Status == qualitygate.GateStatusNotConfigured
+		if gate.Gate != want[index] || (gate.Status != qualitygate.GateStatusPass && !optionalGate) {
 			return fmt.Errorf("quality audit gate %d is not the canonical PASS", index)
 		}
 	}
@@ -322,8 +322,8 @@ func validateS3MaterializationAuditV1(audit qualitygate.AuditV1, workflowID, rev
 		return fmt.Errorf("review candidate must preserve its complete original quality audit")
 	}
 	for index, gate := range audit.GateResults {
-		optionalHidden := audit.Policy == qualitygate.PolicyProblemSetTraining && gate.Gate == qualitygate.GateHiddenRegression && gate.Status == qualitygate.GateStatusNotConfigured
-		if gate.Gate != want[index] || (gate.Status != qualitygate.GateStatusPass && gate.Status != qualitygate.GateStatusBlocked && gate.Status != qualitygate.GateStatusCheckFailed && !optionalHidden) {
+		optionalGate := qualitygate.PolicyAllowsNotConfiguredGateV1(audit.Policy, gate.Gate) && gate.Status == qualitygate.GateStatusNotConfigured
+		if gate.Gate != want[index] || (gate.Status != qualitygate.GateStatusPass && gate.Status != qualitygate.GateStatusBlocked && gate.Status != qualitygate.GateStatusCheckFailed && !optionalGate) {
 			return fmt.Errorf("review candidate has an invalid gate record")
 		}
 	}
@@ -390,7 +390,7 @@ func (a *Activities) validateS3QualityPassDraftStoreInputV1(ctx context.Context,
 	if audit.Decision != evidence.Decision || audit.Policy != evidence.Policy {
 		return fmt.Errorf("S3 materialization decision does not match the original audit")
 	}
-	if evidence.Policy != s3QualityPolicyForParamsV1(input.Params) {
+	if !s3QualityPolicyMatchesParamsV1(evidence.Policy, input.Params) {
 		return fmt.Errorf("quality policy is not authorized by the authoring context")
 	}
 	if err := validateS3MaterializationAuditV1(audit, input.WorkflowID, evidence.SubjectRevision, input.Params.IsProblemSetGeneration() && evidence.Decision == qualitygate.DecisionQuarantine); err != nil {
@@ -425,11 +425,11 @@ func s3QualityDraftStoreParamsV1(params domain.ProblemGenParams, evidenceLevel s
 	return result
 }
 
-func s3QualityPolicyForParamsV1(params domain.ProblemGenParams) string {
+func s3QualityPolicyMatchesParamsV1(policy string, params domain.ProblemGenParams) bool {
 	if params.IsProblemSetGeneration() {
-		return qualitygate.PolicyProblemSetTraining
+		return qualitygate.IsProblemSetTrainingPolicyV1(policy)
 	}
-	return ""
+	return policy == ""
 }
 
 func cloneS3QualityMetadataMapV1(source map[string]interface{}) map[string]interface{} {

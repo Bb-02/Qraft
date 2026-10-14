@@ -352,6 +352,19 @@ func setProblemGenParams(ref domain.ProblemSetGenerationRef, slot domain.Problem
 	params := domain.DefaultProblemGenParams()
 	params.Level = slot.Level
 	params.Tags = append([]string(nil), slot.Tags...)
+	mode := domain.KnowledgePointCombinationSet
+	if len(params.Tags) == 1 {
+		mode = domain.KnowledgePointCombinationSingle
+	}
+	params.KnowledgePointCombination = &domain.KnowledgePointCombinationContract{
+		SchemaVersion: domain.KnowledgePointCombinationSchemaV1,
+		Mode:          mode,
+		MaxConcepts:   len(params.Tags),
+	}
+	if canonical, err := domain.CanonicalKnowledgePointSlugs(mode, params.Tags); err == nil && len(canonical) > 0 {
+		params.Tags = canonical
+	}
+	// Invalid input remains intact so Validate reports duplicate or empty slugs.
 	params.Difficulty = slot.Difficulty
 	params.ProblemSetContext = &domain.ProblemSetGenerationContext{SetID: ref.SetID, Position: slot.Position}
 	params.Locale = "zh"
