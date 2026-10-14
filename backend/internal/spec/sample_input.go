@@ -17,10 +17,15 @@ import (
 )
 
 const (
-	SampleInputParserRuleVersionV1 = "algoforge.sample-input-parser.rules.v1"
+	SampleInputParserRuleVersionV1               = "algoforge.sample-input-parser.rules.v1"
+	SampleInputParserTokenStringsRuleVersionV2   = "algoforge.sample-input-parser.token-strings.rules.v2"
+	TestCaseInputParserRuleVersionV2             = "algoforge.testcase-input-parser.rules.v2"
+	TestCaseInputParserTokenStringsRuleVersionV2 = "algoforge.testcase-input-parser.token-strings.rules.v2"
 
 	SampleInputBindingIntegerV1         = "integer"
 	SampleInputBindingIntegerSequenceV1 = "integer_sequence"
+	SampleInputBindingStringV2          = "string"
+	SampleInputBindingStringSequenceV2  = "string_sequence"
 
 	maxSampleInputBytesV1         = 1 << 20
 	maxSampleInputGrammarLinesV1  = 4096
@@ -34,10 +39,36 @@ const (
 // the authoritative token-line grammar. Exactly one value member is populated.
 // Bindings retain grammar-field order so their JSON hash is deterministic.
 type SampleInputBindingV1 struct {
-	Symbol   string  `json:"symbol"`
-	Kind     string  `json:"kind"`
-	Integer  *int64  `json:"integer,omitempty"`
-	Integers []int64 `json:"integers,omitempty"`
+	Symbol   string   `json:"symbol"`
+	Kind     string   `json:"kind"`
+	Integer  *int64   `json:"integer,omitempty"`
+	Integers []int64  `json:"integers,omitempty"`
+	String   string   `json:"string,omitempty"`
+	Strings  []string `json:"strings,omitempty"`
+}
+
+func (binding SampleInputBindingV1) Length() (int64, bool) {
+	switch binding.Kind {
+	case SampleInputBindingIntegerSequenceV1:
+		return int64(len(binding.Integers)), true
+	case SampleInputBindingStringV2:
+		return int64(len(binding.String)), true
+	case SampleInputBindingStringSequenceV2:
+		return int64(len(binding.Strings)), true
+	default:
+		return 0, false
+	}
+}
+
+// Integer-only contracts retain their original bytes and rule identity. String
+// contracts use nonempty ASCII tokens, with byte length equal to character length.
+func SampleInputParserRuleVersionForSpecV1(spec domain.SemanticSpecV1) string {
+	for _, symbol := range spec.Symbols {
+		if symbol.Scope == domain.SemanticSymbolScopeInput && (symbol.Type == domain.SemanticSymbolString || symbol.Type == domain.SemanticSymbolStringSequence) {
+			return SampleInputParserTokenStringsRuleVersionV2
+		}
+	}
+	return SampleInputParserRuleVersionV1
 }
 
 // ParsedSampleInputV1 is an input-only receipt. It deliberately carries no
@@ -52,14 +83,28 @@ type ParsedSampleInputV1 struct {
 }
 
 type sampleInputParserV1 struct {
-	spec          domain.SemanticSpecV1
-	symbols       map[string]domain.SemanticSymbolV1
-	bindings      map[string]*SampleInputBindingV1
-	bindingOrder  []string
-	physicalLines []string
-	lineIndex     int
-	tokenCount    int
-	canonical     []string
+	spec             domain.SemanticSpecV1
+	symbols          map[string]domain.SemanticSymbolV1
+	bindings         map[string]*SampleInputBindingV1
+	bindingOrder     []string
+	physicalLines    []string
+	lineIndex        int
+	tokenCount       int
+	canonical        []string
+	maxPhysicalLines int
+	maxTokens        int
+}
+
+type inputParserLimitsV1 struct{ bytes, physicalLines, tokens int }
+
+var sampleInputLimitsV1 = inputParserLimitsV1{maxSampleInputBytesV1, maxSampleInputPhysicalLinesV1, maxSampleInputTokensV1}
+var testCaseInputLimitsV2 = inputParserLimitsV1{8 << 20, 1000000, 1000000}
+
+func TestCaseInputParserRuleVersionForSpecV2(spec domain.SemanticSpecV1) string {
+	if SampleInputParserRuleVersionForSpecV1(spec) == SampleInputParserTokenStringsRuleVersionV2 {
+		return TestCaseInputParserTokenStringsRuleVersionV2
+	}
+	return TestCaseInputParserRuleVersionV2
 }
 
 // InputGrammarSHA256V1 returns the JSON identity of the exact grammar used by
@@ -74,17 +119,27 @@ func InputGrammarSHA256V1(grammar domain.SemanticGrammarV1) string {
 }
 
 // ParseSampleInputV1 parses one untrusted candidate against the input grammar.
-// V1 intentionally supports only integer and integer_sequence input symbols;
-// all other input types fail closed until their token serialization is defined.
+// Integer and integer-sequence contracts retain rule v1. ASCII token strings
+// and their sequences use rule v2; other input types remain unsupported.
 func ParseSampleInputV1(spec domain.SemanticSpecV1, raw string) (ParsedSampleInputV1, error) {
-	canonical, bindings, err := parseSampleInputCandidateV1(spec, raw)
+	return parseInputReceiptV1(spec, raw, sampleInputLimitsV1, SampleInputParserRuleVersionForSpecV1(spec))
+}
+
+// ParseTestCaseInputV2 validates full test-case files under the existing CAS
+// budget. It deliberately does not enlarge the sample-input v1 contract.
+func ParseTestCaseInputV2(spec domain.SemanticSpecV1, raw string) (ParsedSampleInputV1, error) {
+	return parseInputReceiptV1(spec, raw, testCaseInputLimitsV2, TestCaseInputParserRuleVersionForSpecV2(spec))
+}
+
+func parseInputReceiptV1(spec domain.SemanticSpecV1, raw string, limits inputParserLimitsV1, rule string) (ParsedSampleInputV1, error) {
+	canonical, bindings, err := parseInputCandidateWithLimitsV1(spec, raw, limits)
 	if err != nil {
 		return ParsedSampleInputV1{}, err
 	}
 
 	// A canonical receipt must itself be accepted and byte-stable. Keep this
 	// check inside the parser so downstream callers cannot accidentally omit it.
-	reparsedCanonical, reparsedBindings, err := parseSampleInputCandidateV1(spec, canonical)
+	reparsedCanonical, reparsedBindings, err := parseInputCandidateWithLimitsV1(spec, canonical, limits)
 	if err != nil {
 		return ParsedSampleInputV1{}, fmt.Errorf("canonical sample input did not reparse: %w", err)
 	}
@@ -97,7 +152,7 @@ func ParseSampleInputV1(spec domain.SemanticSpecV1, raw string) (ParsedSampleInp
 		return ParsedSampleInputV1{}, fmt.Errorf("marshal deterministic sample bindings: %w", err)
 	}
 	return ParsedSampleInputV1{
-		ParserRuleVersion:  SampleInputParserRuleVersionV1,
+		ParserRuleVersion:  rule,
 		InputGrammarSHA256: InputGrammarSHA256V1(spec.InputGrammar),
 		CanonicalInput:     canonical,
 		CanonicalSHA256:    sampleInputSHA256V1([]byte(canonical)),
@@ -107,17 +162,23 @@ func ParseSampleInputV1(spec domain.SemanticSpecV1, raw string) (ParsedSampleInp
 }
 
 func parseSampleInputCandidateV1(spec domain.SemanticSpecV1, raw string) (string, []SampleInputBindingV1, error) {
-	if len(raw) > maxSampleInputBytesV1 {
-		return "", nil, fmt.Errorf("sample input exceeds %d bytes", maxSampleInputBytesV1)
+	return parseInputCandidateWithLimitsV1(spec, raw, sampleInputLimitsV1)
+}
+
+func parseInputCandidateWithLimitsV1(spec domain.SemanticSpecV1, raw string, limits inputParserLimitsV1) (string, []SampleInputBindingV1, error) {
+	if len(raw) > limits.bytes {
+		return "", nil, fmt.Errorf("sample input exceeds %d bytes", limits.bytes)
 	}
-	lines, err := splitSampleInputLinesV1(raw)
+	lines, err := splitInputLinesWithLimitV1(raw, limits.physicalLines)
 	if err != nil {
 		return "", nil, err
 	}
 	parser := &sampleInputParserV1{
-		spec:          spec,
-		bindings:      make(map[string]*SampleInputBindingV1),
-		physicalLines: lines,
+		spec:             spec,
+		bindings:         make(map[string]*SampleInputBindingV1),
+		physicalLines:    lines,
+		maxPhysicalLines: limits.physicalLines,
+		maxTokens:        limits.tokens,
 	}
 	if err := parser.validateContract(); err != nil {
 		return "", nil, err
@@ -146,6 +207,10 @@ func parseSampleInputCandidateV1(spec domain.SemanticSpecV1, raw string) (string
 }
 
 func splitSampleInputLinesV1(raw string) ([]string, error) {
+	return splitInputLinesWithLimitV1(raw, maxSampleInputPhysicalLinesV1)
+}
+
+func splitInputLinesWithLimitV1(raw string, maxLines int) ([]string, error) {
 	if !utf8.ValidString(raw) {
 		return nil, fmt.Errorf("sample input is not valid UTF-8")
 	}
@@ -171,8 +236,8 @@ func splitSampleInputLinesV1(raw string) ([]string, error) {
 	if lines[len(lines)-1] == "" {
 		lines = lines[:len(lines)-1]
 	}
-	if len(lines) > maxSampleInputPhysicalLinesV1 {
-		return nil, fmt.Errorf("sample input exceeds %d physical lines", maxSampleInputPhysicalLinesV1)
+	if len(lines) > maxLines {
+		return nil, fmt.Errorf("sample input exceeds %d physical lines", maxLines)
 	}
 	return lines, nil
 }
@@ -199,8 +264,24 @@ func (p *sampleInputParserV1) validateContract() error {
 		p.symbols[symbol.Name] = symbol
 		if symbol.Scope == domain.SemanticSymbolScopeInput &&
 			symbol.Type != domain.SemanticSymbolInteger &&
-			symbol.Type != domain.SemanticSymbolIntegerSequence {
+			symbol.Type != domain.SemanticSymbolIntegerSequence &&
+			symbol.Type != domain.SemanticSymbolString &&
+			symbol.Type != domain.SemanticSymbolStringSequence {
 			return fmt.Errorf("input symbol %q has unsupported parser type %q", symbol.Name, symbol.Type)
+		}
+		if symbol.Scope == domain.SemanticSymbolScopeInput && symbol.Type == domain.SemanticSymbolString {
+			found, minimum := false, int64(0)
+			for _, constraint := range p.spec.Constraints {
+				if constraint.Subject == symbol.Name && constraint.Kind == domain.SemanticConstraintLengthRange && constraint.Min != nil {
+					if !found || *constraint.Min > minimum {
+						minimum = *constraint.Min
+					}
+					found = true
+				}
+			}
+			if !found || minimum < 1 {
+				return fmt.Errorf("token string requires non-empty ASCII: symbol %q needs length_range excluding empty strings; token-lines cannot express an empty string", symbol.Name)
+			}
 		}
 	}
 
@@ -231,16 +312,16 @@ func (p *sampleInputParserV1) validateContract() error {
 			fieldSymbols[field.Symbol] = struct{}{}
 			switch field.Mode {
 			case domain.SemanticGrammarFieldScalar:
-				if symbol.Type != domain.SemanticSymbolInteger || field.Count != nil || !sampleInputLiteralOneV1(line.Repeat) {
-					return fmt.Errorf("scalar field %q requires integer type, no count, and literal repeat=1", field.Symbol)
+				if (symbol.Type != domain.SemanticSymbolInteger && symbol.Type != domain.SemanticSymbolString) || field.Count != nil || !sampleInputLiteralOneV1(line.Repeat) {
+					return fmt.Errorf("scalar field %q requires integer or token-string type, no count, and literal repeat=1", field.Symbol)
 				}
 			case domain.SemanticGrammarFieldSequence:
-				if symbol.Type != domain.SemanticSymbolIntegerSequence || field.Count == nil || !sampleInputLiteralOneV1(line.Repeat) {
-					return fmt.Errorf("sequence field %q requires integer_sequence type, count, and literal repeat=1", field.Symbol)
+				if (symbol.Type != domain.SemanticSymbolIntegerSequence && symbol.Type != domain.SemanticSymbolStringSequence) || field.Count == nil || !sampleInputLiteralOneV1(line.Repeat) {
+					return fmt.Errorf("sequence field %q requires integer_sequence or string_sequence type, count, and literal repeat=1", field.Symbol)
 				}
 			case domain.SemanticGrammarFieldElementPerRepeat:
-				if symbol.Type != domain.SemanticSymbolIntegerSequence || field.Count != nil {
-					return fmt.Errorf("element_per_repeat field %q requires integer_sequence type and no count", field.Symbol)
+				if (symbol.Type != domain.SemanticSymbolIntegerSequence && symbol.Type != domain.SemanticSymbolStringSequence) || field.Count != nil {
+					return fmt.Errorf("element_per_repeat field %q requires integer_sequence or string_sequence type and no count", field.Symbol)
 				}
 			default:
 				return fmt.Errorf("input grammar field %q has unsupported mode %q", field.Symbol, field.Mode)
@@ -265,7 +346,7 @@ func (p *sampleInputParserV1) parseGrammar() error {
 		if err != nil {
 			return fmt.Errorf("evaluate repeat for grammar line %q: %w", line.ID, err)
 		}
-		repeat, err := sampleInputExtentV1(repeatValue, maxSampleInputPhysicalLinesV1-expandedLines, "line repeat")
+		repeat, err := sampleInputExtentV1(repeatValue, p.maxPhysicalLines-expandedLines, "line repeat")
 		if err != nil {
 			return fmt.Errorf("grammar line %q: %w", line.ID, err)
 		}
@@ -290,6 +371,20 @@ func (p *sampleInputParserV1) parseGrammar() error {
 			for _, field := range line.Fields {
 				switch field.Mode {
 				case domain.SemanticGrammarFieldScalar:
+					if p.symbols[field.Symbol].Type == domain.SemanticSymbolString {
+						value, next, err := consumeSampleStringV2(tokens, cursor)
+						if err != nil {
+							return fmt.Errorf("grammar line %q field %q: %w", line.ID, field.Symbol, err)
+						}
+						cursor = next
+						canonicalTokens = append(canonicalTokens, value)
+						if _, exists := p.bindings[field.Symbol]; exists {
+							return fmt.Errorf("sample input symbol %q was bound more than once", field.Symbol)
+						}
+						p.bindings[field.Symbol] = &SampleInputBindingV1{Symbol: field.Symbol, Kind: SampleInputBindingStringV2, String: value}
+						p.bindingOrder = append(p.bindingOrder, field.Symbol)
+						continue
+					}
 					value, canonical, next, err := consumeSampleIntegerV1(tokens, cursor)
 					if err != nil {
 						return fmt.Errorf("grammar line %q field %q: %w", line.ID, field.Symbol, err)
@@ -304,9 +399,24 @@ func (p *sampleInputParserV1) parseGrammar() error {
 					if err != nil {
 						return fmt.Errorf("evaluate count for field %q: %w", field.Symbol, err)
 					}
-					count, err := sampleInputExtentV1(countValue, maxSampleInputTokensV1-p.tokenCount-cursor, "sequence count")
+					count, err := sampleInputExtentV1(countValue, p.maxTokens-p.tokenCount-cursor, "sequence count")
 					if err != nil {
 						return fmt.Errorf("field %q: %w", field.Symbol, err)
+					}
+					if p.symbols[field.Symbol].Type == domain.SemanticSymbolStringSequence {
+						if err := p.addSequenceBinding(field.Symbol); err != nil {
+							return err
+						}
+						for index := 0; index < count; index++ {
+							value, next, err := consumeSampleStringV2(tokens, cursor)
+							if err != nil {
+								return fmt.Errorf("grammar line %q field %q element %d: %w", line.ID, field.Symbol, index, err)
+							}
+							cursor = next
+							canonicalTokens = append(canonicalTokens, value)
+							p.bindings[field.Symbol].Strings = append(p.bindings[field.Symbol].Strings, value)
+						}
+						continue
 					}
 					values := make([]int64, 0, count)
 					for index := 0; index < count; index++ {
@@ -322,6 +432,16 @@ func (p *sampleInputParserV1) parseGrammar() error {
 						return err
 					}
 				case domain.SemanticGrammarFieldElementPerRepeat:
+					if p.symbols[field.Symbol].Type == domain.SemanticSymbolStringSequence {
+						value, next, err := consumeSampleStringV2(tokens, cursor)
+						if err != nil {
+							return fmt.Errorf("grammar line %q field %q repetition %d: %w", line.ID, field.Symbol, repetition, err)
+						}
+						cursor = next
+						canonicalTokens = append(canonicalTokens, value)
+						p.bindings[field.Symbol].Strings = append(p.bindings[field.Symbol].Strings, value)
+						continue
+					}
 					value, canonical, next, err := consumeSampleIntegerV1(tokens, cursor)
 					if err != nil {
 						return fmt.Errorf("grammar line %q field %q repetition %d: %w", line.ID, field.Symbol, repetition, err)
@@ -332,11 +452,14 @@ func (p *sampleInputParserV1) parseGrammar() error {
 				}
 			}
 			if cursor != len(tokens) {
+				if len(line.Fields) == 1 && line.Fields[0].Mode == domain.SemanticGrammarFieldScalar && p.symbols[line.Fields[0].Symbol].Type == domain.SemanticSymbolString {
+					return fmt.Errorf("token string requires non-empty ASCII without whitespace: whole-line text with spaces is unsupported")
+				}
 				return fmt.Errorf("grammar line %q physical line %d has %d extra token(s)", line.ID, p.lineIndex+1, len(tokens)-cursor)
 			}
 			p.tokenCount += cursor
-			if p.tokenCount > maxSampleInputTokensV1 {
-				return fmt.Errorf("sample input exceeds %d tokens", maxSampleInputTokensV1)
+			if p.tokenCount > p.maxTokens {
+				return fmt.Errorf("sample input exceeds %d tokens", p.maxTokens)
 			}
 			p.canonical = append(p.canonical, strings.Join(canonicalTokens, " "))
 			p.lineIndex++
@@ -360,6 +483,9 @@ func (p *sampleInputParserV1) addSequenceBinding(symbol string) error {
 		return fmt.Errorf("sample input symbol %q was bound more than once", symbol)
 	}
 	p.bindings[symbol] = &SampleInputBindingV1{Symbol: symbol, Kind: SampleInputBindingIntegerSequenceV1, Integers: []int64{}}
+	if p.symbols[symbol].Type == domain.SemanticSymbolStringSequence {
+		p.bindings[symbol] = &SampleInputBindingV1{Symbol: symbol, Kind: SampleInputBindingStringSequenceV2, Strings: []string{}}
+	}
 	p.bindingOrder = append(p.bindingOrder, symbol)
 	return nil
 }
@@ -388,6 +514,18 @@ func consumeSampleIntegerV1(tokens []string, cursor int) (int64, string, int, er
 		return 0, "", cursor, fmt.Errorf("integer token %q is outside int64", token)
 	}
 	return value, strconv.FormatInt(value, 10), cursor + 1, nil
+}
+
+func consumeSampleStringV2(tokens []string, cursor int) (string, int, error) {
+	if cursor >= len(tokens) || tokens[cursor] == "" {
+		return "", cursor, fmt.Errorf("token string requires non-empty ASCII without whitespace; empty strings cannot be expressed by token-lines grammar")
+	}
+	for _, character := range tokens[cursor] {
+		if character < 33 || character > 126 {
+			return "", cursor, fmt.Errorf("token string requires non-empty ASCII without whitespace; found unsupported character U+%04X", character)
+		}
+	}
+	return tokens[cursor], cursor + 1, nil
 }
 
 func sampleInputIntegerTokenV1(value string) bool {
@@ -448,10 +586,14 @@ func (p *sampleInputParserV1) evalExpression(expression domain.SemanticExpressio
 			return nil, fmt.Errorf("malformed length expression")
 		}
 		binding, exists := p.bindings[expression.Symbol]
-		if !exists || binding.Kind != SampleInputBindingIntegerSequenceV1 {
+		if !exists {
 			return nil, fmt.Errorf("sequence symbol %q is not bound", expression.Symbol)
 		}
-		value = big.NewInt(int64(len(binding.Integers)))
+		length, supported := binding.Length()
+		if !supported {
+			return nil, fmt.Errorf("length symbol %q is not a string or sequence binding", expression.Symbol)
+		}
+		value = big.NewInt(length)
 	case domain.SemanticExpressionCardinality:
 		return nil, fmt.Errorf("cardinality expressions are unsupported by sample parser v1")
 	case domain.SemanticExpressionAdd, domain.SemanticExpressionSubtract, domain.SemanticExpressionMultiply, domain.SemanticExpressionFloorDivide:
@@ -568,6 +710,15 @@ func (p *sampleInputParserV1) validateConstraints() error {
 					return fmt.Errorf("input sequence %q element %d=%d is outside [%d,%d]", symbol.Name, index, value, elementRange.min, elementRange.max)
 				}
 			}
+		case domain.SemanticSymbolString, domain.SemanticSymbolStringSequence:
+			lengthRange, exists := ranges[sampleInputMeasureKeyV1(symbol.Name, domain.SemanticBoundaryMeasureLength)]
+			if !exists {
+				return fmt.Errorf("input %s %q lacks length_range", symbol.Type, symbol.Name)
+			}
+			length, supported := binding.Length()
+			if !supported || length < lengthRange.min || length > lengthRange.max {
+				return fmt.Errorf("input %s %q length %d is outside [%d,%d]", symbol.Type, symbol.Name, length, lengthRange.min, lengthRange.max)
+			}
 		}
 	}
 	return nil
@@ -581,6 +732,8 @@ func sampleInputConstraintMeasureV1(symbolType, kind string) (string, bool) {
 		return domain.SemanticBoundaryMeasureLength, true
 	case symbolType == domain.SemanticSymbolIntegerSequence && kind == domain.SemanticConstraintElementRange:
 		return domain.SemanticBoundaryMeasureElementValue, true
+	case (symbolType == domain.SemanticSymbolString || symbolType == domain.SemanticSymbolStringSequence) && kind == domain.SemanticConstraintLengthRange:
+		return domain.SemanticBoundaryMeasureLength, true
 	default:
 		return "", false
 	}
@@ -650,7 +803,8 @@ func (p *sampleInputParserV1) validateForbiddenBoundaries() error {
 		}
 		supportedMeasure := (symbol.Type == domain.SemanticSymbolInteger && boundary.Measure == domain.SemanticBoundaryMeasureValue) ||
 			(symbol.Type == domain.SemanticSymbolIntegerSequence &&
-				(boundary.Measure == domain.SemanticBoundaryMeasureLength || boundary.Measure == domain.SemanticBoundaryMeasureElementValue))
+				(boundary.Measure == domain.SemanticBoundaryMeasureLength || boundary.Measure == domain.SemanticBoundaryMeasureElementValue)) ||
+			((symbol.Type == domain.SemanticSymbolString || symbol.Type == domain.SemanticSymbolStringSequence) && boundary.Measure == domain.SemanticBoundaryMeasureLength)
 		if !supportedMeasure {
 			return fmt.Errorf("boundary %d has unsupported measure %q for input symbol %q", index, boundary.Measure, boundary.Symbol)
 		}
@@ -662,8 +816,9 @@ func (p *sampleInputParserV1) validateForbiddenBoundaries() error {
 		switch {
 		case symbol.Type == domain.SemanticSymbolInteger && boundary.Measure == domain.SemanticBoundaryMeasureValue:
 			forbidden = *binding.Integer == boundary.Value
-		case symbol.Type == domain.SemanticSymbolIntegerSequence && boundary.Measure == domain.SemanticBoundaryMeasureLength:
-			forbidden = int64(len(binding.Integers)) == boundary.Value
+		case boundary.Measure == domain.SemanticBoundaryMeasureLength:
+			length, supported := binding.Length()
+			forbidden = supported && length == boundary.Value
 		case symbol.Type == domain.SemanticSymbolIntegerSequence && boundary.Measure == domain.SemanticBoundaryMeasureElementValue:
 			for _, value := range binding.Integers {
 				if value == boundary.Value {
@@ -724,6 +879,9 @@ func cloneSampleInputBindingV1(binding SampleInputBindingV1) SampleInputBindingV
 			cloned.Integers = []int64{}
 		}
 	}
+	if binding.Strings != nil {
+		cloned.Strings = append([]string{}, binding.Strings...)
+	}
 	return cloned
 }
 
@@ -734,6 +892,14 @@ func sampleInputBindingsEqualV1(left, right []SampleInputBindingV1) bool {
 	for index := range left {
 		if left[index].Symbol != right[index].Symbol || left[index].Kind != right[index].Kind {
 			return false
+		}
+		if left[index].String != right[index].String || len(left[index].Strings) != len(right[index].Strings) {
+			return false
+		}
+		for i := range left[index].Strings {
+			if left[index].Strings[i] != right[index].Strings[i] {
+				return false
+			}
 		}
 		if (left[index].Integer == nil) != (right[index].Integer == nil) {
 			return false

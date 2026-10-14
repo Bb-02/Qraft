@@ -15,6 +15,7 @@ func TestModelOutputFailureExplainsStageAndPreservesEvidence(t *testing.T) {
 		{"parsing authoring-plan response: $.semantic_spec.input_constraints: unknown or non-canonical JSON key", "设计题意与约束", "字段名", "model_output_invalid"},
 		{"parsing authoring-plan response: $.semantic_spec: invalid character after object key:value pair", "设计题意与约束", "合法的 JSON", "model_output_invalid"},
 		{"AuthoringPlanFormatError: schema mismatch difficulty 401", "设计题意与约束", "数据结构", "model_output_invalid"},
+		{"parsing authoring-plan response: $.unsupported parser type: unknown or non-canonical JSON key", "设计题意与约束", "字段名", "model_output_invalid"},
 		{"ReviewerFormatError: unknown field", "评审题目", "字段名", "model_output_invalid"},
 		{"AuthoringPlanTruncatedError: stop_reason=length", "设计题意与约束", "截断", "model_output_truncated"},
 	} {

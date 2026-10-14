@@ -14,13 +14,13 @@ func EnrichFailure(failure *domain.GenerationFailure) *domain.GenerationFailure 
 	}
 	copy := *failure
 	if copy.Code == "generation_failed" || copy.Code == "model_output_invalid" || copy.Code == "model_output_truncated" {
-		if unsupported := unsupportedInputFailure(copy.TechnicalDetails); unsupported != nil {
-			unsupported.TechnicalDetails = boundedFailureText(copy.TechnicalDetails, 6000)
-			return unsupported
-		}
 		if explained := modelOutputFailure(copy.TechnicalDetails); explained != nil {
 			explained.TechnicalDetails = boundedFailureText(copy.TechnicalDetails, 6000)
 			return explained
+		}
+		if unsupported := unsupportedInputFailure(copy.TechnicalDetails); unsupported != nil {
+			unsupported.TechnicalDetails = boundedFailureText(copy.TechnicalDetails, 6000)
+			return unsupported
 		}
 	}
 	return &copy

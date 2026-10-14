@@ -12,21 +12,24 @@ import (
 )
 
 const (
-	TestManifestSchemaVersionV2        = "algoforge.test-manifest.v2"
-	IntegerBoundaryCoverageSchemaV1    = "algoforge.integer-boundary-coverage.v1"
-	IntegerBoundaryCoverageRuleVersion = "algoforge.integer-boundary-coverage.rules.v1"
-	IntegerBoundaryCasePlanSchemaV1    = "algoforge.integer-boundary-case-plan.v1"
-	IntegerBoundaryObligationBoundary  = "allowed_boundary"
-	IntegerBoundaryObligationRangeMin  = "range_minimum"
-	IntegerBoundaryObligationRangeMax  = "range_maximum"
-	IntegerBoundaryObligationRegion    = "constraint_region"
-	TestManifestPurposeSample          = "sample"
-	TestManifestPurposeTiny            = "tiny"
-	TestManifestPurposeRandom          = "random"
-	TestManifestPurposeBoundary        = "boundary"
-	TestManifestPurposeExtreme         = "extreme"
-	TestManifestPurposeComplexity      = "complexity"
-	TestManifestPurposeMetamorphic     = "metamorphic"
+	TestManifestSchemaVersionV2                      = "algoforge.test-manifest.v2"
+	IntegerBoundaryCoverageSchemaV1                  = "algoforge.integer-boundary-coverage.v1"
+	IntegerBoundaryCoverageRuleVersion               = "algoforge.integer-boundary-coverage.rules.v1"
+	TokenStringBoundaryCoverageRuleVersionV2         = "algoforge.token-string-boundary-coverage.rules.v2"
+	FullCaseIntegerBoundaryCoverageRuleVersionV2     = "algoforge.integer-boundary-coverage.fullcase.rules.v2"
+	FullCaseTokenStringBoundaryCoverageRuleVersionV2 = "algoforge.token-string-boundary-coverage.fullcase.rules.v2"
+	IntegerBoundaryCasePlanSchemaV1                  = "algoforge.integer-boundary-case-plan.v1"
+	IntegerBoundaryObligationBoundary                = "allowed_boundary"
+	IntegerBoundaryObligationRangeMin                = "range_minimum"
+	IntegerBoundaryObligationRangeMax                = "range_maximum"
+	IntegerBoundaryObligationRegion                  = "constraint_region"
+	TestManifestPurposeSample                        = "sample"
+	TestManifestPurposeTiny                          = "tiny"
+	TestManifestPurposeRandom                        = "random"
+	TestManifestPurposeBoundary                      = "boundary"
+	TestManifestPurposeExtreme                       = "extreme"
+	TestManifestPurposeComplexity                    = "complexity"
+	TestManifestPurposeMetamorphic                   = "metamorphic"
 )
 
 // TestManifestV2 is additive. V1 remains unchanged for old workflow histories.
@@ -307,7 +310,7 @@ func DeriveIntegerBoundaryCasePlanV1(specValue domain.SemanticSpecV1, plan domai
 		}
 	}
 	return &IntegerBoundaryCasePlanV1{
-		SchemaVersion: IntegerBoundaryCasePlanSchemaV1, RuleVersion: IntegerBoundaryCoverageRuleVersion,
+		SchemaVersion: IntegerBoundaryCasePlanSchemaV1, RuleVersion: boundaryCoverageRuleForSpecV1(specValue),
 		SemanticSpecSHA256: specSHA, AuthoringPlanSHA256: planSHA, Obligations: obligations,
 	}, nil
 }
@@ -316,8 +319,8 @@ func integerRangeObligationIDV1(constraint domain.SemanticConstraintV1, edge str
 	return fmt.Sprintf("range_edge:%s:%s:%s", constraint.Subject, constraint.Kind, edge)
 }
 
-func CanonicalIntegerBoundaryCasePlanV1(plan IntegerBoundaryCasePlanV1) (json.RawMessage, string, error) {
-	if plan.SchemaVersion != IntegerBoundaryCasePlanSchemaV1 || plan.RuleVersion != IntegerBoundaryCoverageRuleVersion ||
+func CanonicalIntegerBoundaryCasePlanV1(plan IntegerBoundaryCasePlanV1, expectedRules ...string) (json.RawMessage, string, error) {
+	if plan.SchemaVersion != IntegerBoundaryCasePlanSchemaV1 || !boundaryCoverageExpectedRuleV1(plan.RuleVersion, expectedRules) ||
 		!isManifestSHA256(plan.SemanticSpecSHA256) || !isManifestSHA256(plan.AuthoringPlanSHA256) || len(plan.Obligations) == 0 {
 		return nil, "", fmt.Errorf("invalid integer boundary case plan")
 	}
@@ -360,15 +363,16 @@ type IntegerBoundaryCoverageCaseInputV1 struct {
 }
 
 type IntegerBoundaryCoverageReceiptV1 struct {
-	SchemaVersion       string   `json:"schema_version"`
-	RuleVersion         string   `json:"rule_version"`
-	SemanticSpecSHA256  string   `json:"semantic_spec_sha256"`
-	AuthoringPlanSHA256 string   `json:"authoring_plan_sha256"`
-	DerivedPlanSHA256   string   `json:"derived_plan_sha256"`
-	CasePlanSHA256      string   `json:"case_plan_sha256"`
-	CoveredRegions      []string `json:"covered_regions"`
-	CoveredBoundaryRefs []string `json:"covered_boundary_refs"`
-	CoveredRangeEdges   []string `json:"covered_range_edges"`
+	SchemaVersion          string   `json:"schema_version"`
+	RuleVersion            string   `json:"rule_version"`
+	SemanticSpecSHA256     string   `json:"semantic_spec_sha256"`
+	AuthoringPlanSHA256    string   `json:"authoring_plan_sha256"`
+	DerivedPlanSHA256      string   `json:"derived_plan_sha256"`
+	CasePlanSHA256         string   `json:"case_plan_sha256"`
+	CoveredRegions         []string `json:"covered_regions"`
+	CoveredBoundaryRefs    []string `json:"covered_boundary_refs"`
+	CoveredRangeEdges      []string `json:"covered_range_edges"`
+	InputParserRuleVersion string   `json:"input_parser_rule_version,omitempty"`
 }
 
 // ValidateIntegerBoundaryCoverageV1 reparses exact input bytes and proves that
@@ -379,6 +383,14 @@ func ValidateIntegerBoundaryCoverageV1(
 	manifest TestManifestV2,
 	inputs []IntegerBoundaryCoverageCaseInputV1,
 ) (*IntegerBoundaryCoverageReceiptV1, error) {
+	return validateBoundaryCoverageWithInputPhaseV1(specValue, plan, manifest, inputs, false)
+}
+
+func ValidateTestCaseBoundaryCoverageV2(specValue domain.SemanticSpecV1, plan domain.AuthoringPlanV1, manifest TestManifestV2, inputs []IntegerBoundaryCoverageCaseInputV1) (*IntegerBoundaryCoverageReceiptV1, error) {
+	return validateBoundaryCoverageWithInputPhaseV1(specValue, plan, manifest, inputs, true)
+}
+
+func validateBoundaryCoverageWithInputPhaseV1(specValue domain.SemanticSpecV1, plan domain.AuthoringPlanV1, manifest TestManifestV2, inputs []IntegerBoundaryCoverageCaseInputV1, fullCase bool) (*IntegerBoundaryCoverageReceiptV1, error) {
 	if err := validateTestManifestV2Core(manifest, false); err != nil {
 		return nil, fmt.Errorf("invalid TestManifest v2: %w", err)
 	}
@@ -386,7 +398,7 @@ func ValidateIntegerBoundaryCoverageV1(
 	if err != nil {
 		return nil, fmt.Errorf("derive integer boundary plan: %w", err)
 	}
-	_, derivedPlanSHA, err := CanonicalIntegerBoundaryCasePlanV1(*derivedPlan)
+	_, derivedPlanSHA, err := CanonicalIntegerBoundaryCasePlanV1(*derivedPlan, boundaryCoverageRuleForSpecV1(specValue))
 	if err != nil {
 		return nil, err
 	}
@@ -427,7 +439,11 @@ func ValidateIntegerBoundaryCoverageV1(
 		if !exists || sha256Hex([]byte(raw)) != item.InputSHA256 {
 			return nil, fmt.Errorf("case %q resolved bytes do not match input artifact", item.TestID)
 		}
-		parsed, err := speccontract.ParseSampleInputV1(specValue, raw)
+		parseInput := speccontract.ParseSampleInputV1
+		if fullCase {
+			parseInput = speccontract.ParseTestCaseInputV2
+		}
+		parsed, err := parseInput(specValue, raw)
 		if err != nil {
 			return nil, fmt.Errorf("case %q does not satisfy the integer input contract: %w", item.TestID, err)
 		}
@@ -517,19 +533,26 @@ func ValidateIntegerBoundaryCoverageV1(
 	if err != nil {
 		return nil, err
 	}
-	return &IntegerBoundaryCoverageReceiptV1{
-		SchemaVersion: IntegerBoundaryCoverageSchemaV1, RuleVersion: IntegerBoundaryCoverageRuleVersion,
+	receipt := &IntegerBoundaryCoverageReceiptV1{
+		SchemaVersion: IntegerBoundaryCoverageSchemaV1, RuleVersion: boundaryCoverageReceiptRuleForSpecV1(specValue, fullCase),
 		SemanticSpecSHA256: specSHA, AuthoringPlanSHA256: planSHA, DerivedPlanSHA256: derivedPlanSHA, CasePlanSHA256: casePlanSHA,
 		CoveredRegions: regions, CoveredBoundaryRefs: boundaries, CoveredRangeEdges: wantEdges,
-	}, nil
+	}
+	if fullCase {
+		receipt.InputParserRuleVersion = speccontract.TestCaseInputParserRuleVersionForSpecV2(specValue)
+	}
+	return receipt, nil
 }
 
 func validateIntegerCoverageProfileV1(specValue domain.SemanticSpecV1) error {
+	if err := speccontract.ValidateSampleInputProfileV1(specValue); err != nil {
+		return err
+	}
 	for _, symbol := range specValue.Symbols {
 		if symbol.Scope != domain.SemanticSymbolScopeInput {
 			continue
 		}
-		if symbol.Type != domain.SemanticSymbolInteger && symbol.Type != domain.SemanticSymbolIntegerSequence {
+		if symbol.Type != domain.SemanticSymbolInteger && symbol.Type != domain.SemanticSymbolIntegerSequence && symbol.Type != domain.SemanticSymbolString && symbol.Type != domain.SemanticSymbolStringSequence {
 			return fmt.Errorf("integer coverage profile does not support input symbol %q type %q", symbol.Name, symbol.Type)
 		}
 	}
@@ -560,7 +583,8 @@ func integerBoundaryHitV1(boundary domain.SemanticBoundaryV1, bindings map[strin
 	case domain.SemanticBoundaryMeasureValue:
 		return binding.Integer != nil && *binding.Integer == boundary.Value
 	case domain.SemanticBoundaryMeasureLength:
-		return int64(len(binding.Integers)) == boundary.Value
+		length, supported := binding.Length()
+		return supported && length == boundary.Value
 	case domain.SemanticBoundaryMeasureElementValue:
 		for _, value := range binding.Integers {
 			if value == boundary.Value {
@@ -580,7 +604,8 @@ func integerConstraintEdgeHitV1(constraint domain.SemanticConstraintV1, value in
 	case domain.SemanticConstraintIntegerRange:
 		return binding.Integer != nil && *binding.Integer == value
 	case domain.SemanticConstraintLengthRange:
-		return int64(len(binding.Integers)) == value
+		length, supported := binding.Length()
+		return supported && length == value
 	case domain.SemanticConstraintElementRange:
 		for _, item := range binding.Integers {
 			if item == value {
@@ -602,16 +627,51 @@ func sortedTrueKeysV1(values map[string]bool) []string {
 	return result
 }
 
-func CanonicalIntegerBoundaryCoverageReceiptV1(receipt IntegerBoundaryCoverageReceiptV1) (json.RawMessage, string, error) {
-	if receipt.SchemaVersion != IntegerBoundaryCoverageSchemaV1 || receipt.RuleVersion != IntegerBoundaryCoverageRuleVersion ||
+func CanonicalIntegerBoundaryCoverageReceiptV1(receipt IntegerBoundaryCoverageReceiptV1, expectedRules ...string) (json.RawMessage, string, error) {
+	if receipt.SchemaVersion != IntegerBoundaryCoverageSchemaV1 || !boundaryCoverageExpectedRuleV1(receipt.RuleVersion, expectedRules) ||
 		!isManifestSHA256(receipt.SemanticSpecSHA256) || !isManifestSHA256(receipt.AuthoringPlanSHA256) ||
 		!isManifestSHA256(receipt.DerivedPlanSHA256) || !isManifestSHA256(receipt.CasePlanSHA256) ||
 		!sortedUniqueCanonicalStringsV2(receipt.CoveredRegions) || !sortedUniqueCanonicalStringsV2(receipt.CoveredBoundaryRefs) || !sortedUniqueCanonicalStringsV2(receipt.CoveredRangeEdges) {
 		return nil, "", fmt.Errorf("invalid integer boundary coverage receipt")
+	}
+	expectedParser := ""
+	if receipt.RuleVersion == FullCaseIntegerBoundaryCoverageRuleVersionV2 {
+		expectedParser = speccontract.TestCaseInputParserRuleVersionV2
+	}
+	if receipt.RuleVersion == FullCaseTokenStringBoundaryCoverageRuleVersionV2 {
+		expectedParser = speccontract.TestCaseInputParserTokenStringsRuleVersionV2
+	}
+	if receipt.InputParserRuleVersion != expectedParser {
+		return nil, "", fmt.Errorf("boundary coverage input parser rule mismatch")
 	}
 	encoded, err := json.Marshal(receipt)
 	if err != nil {
 		return nil, "", err
 	}
 	return encoded, sha256Hex(encoded), nil
+}
+
+func boundaryCoverageRuleForSpecV1(specValue domain.SemanticSpecV1) string {
+	if speccontract.SampleInputParserRuleVersionForSpecV1(specValue) == speccontract.SampleInputParserTokenStringsRuleVersionV2 {
+		return TokenStringBoundaryCoverageRuleVersionV2
+	}
+	return IntegerBoundaryCoverageRuleVersion
+}
+
+func boundaryCoverageExpectedRuleV1(actual string, expectedRules []string) bool {
+	expected := IntegerBoundaryCoverageRuleVersion
+	if len(expectedRules) == 1 {
+		expected = expectedRules[0]
+	}
+	return len(expectedRules) <= 1 && (expected == IntegerBoundaryCoverageRuleVersion || expected == TokenStringBoundaryCoverageRuleVersionV2 || expected == FullCaseIntegerBoundaryCoverageRuleVersionV2 || expected == FullCaseTokenStringBoundaryCoverageRuleVersionV2) && actual == expected
+}
+
+func boundaryCoverageReceiptRuleForSpecV1(specValue domain.SemanticSpecV1, fullCase bool) string {
+	if !fullCase {
+		return boundaryCoverageRuleForSpecV1(specValue)
+	}
+	if speccontract.SampleInputParserRuleVersionForSpecV1(specValue) == speccontract.SampleInputParserTokenStringsRuleVersionV2 {
+		return FullCaseTokenStringBoundaryCoverageRuleVersionV2
+	}
+	return FullCaseIntegerBoundaryCoverageRuleVersionV2
 }

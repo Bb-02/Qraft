@@ -516,6 +516,7 @@ type S3CasePlanBundleV1 struct {
 	Cases                  []S3ManifestCasePlanV1 `json:"cases"`
 	SanitizerCaseIDs       []string               `json:"sanitizer_case_ids"`
 	SanitizerSuiteSHA256   string                 `json:"sanitizer_suite_sha256"`
+	InputParserRuleVersion string                 `json:"input_parser_rule_version,omitempty"`
 }
 
 type MaterializeS3CasePlanInputV1 struct {
@@ -571,6 +572,7 @@ func (a *Activities) MaterializeS3CasePlanActivityV1(ctx context.Context, in Mat
 		return nil, fmt.Errorf("hash test-data activity result: %w", err)
 	}
 	plan := S3CasePlanBundleV1{SchemaVersion: S3CasePlanSchemaV1, SemanticSpecSHA256: semanticSHA, AuthoringBundleSHA256: in.ExpectedAuthoringBundleSHA, TestDataIdentitySHA256: testIdentity, Cases: make([]S3ManifestCasePlanV1, len(in.TestData.TestCases)), SanitizerCaseIDs: []string{}}
+	plan.InputParserRuleVersion = speccontract.TestCaseInputParserRuleVersionForSpecV2(*bundle.SemanticSpec)
 	sanitizerIdentities := make([]struct {
 		TestID      string `json:"test_id"`
 		InputSHA256 string `json:"input_sha256"`
@@ -598,7 +600,7 @@ func (a *Activities) MaterializeS3CasePlanActivityV1(ctx context.Context, in Mat
 		default:
 			return nil, s3ContractErrorV1("case %q must contain exactly one durable or inline input", testID)
 		}
-		parsed, parseErr := speccontract.ParseSampleInputV1(*bundle.SemanticSpec, string(raw))
+		parsed, parseErr := speccontract.ParseTestCaseInputV2(*bundle.SemanticSpec, string(raw))
 		if parseErr != nil || parsed.CanonicalInput != string(raw) {
 			return nil, s3QualityErrorV1("case %q is not canonical SemanticSpec input: %v", testID, parseErr)
 		}
@@ -1165,6 +1167,10 @@ func (a *Activities) BuildS3TestManifestActivityV1(ctx context.Context, in S3Man
 	if speccontract.SemanticSpecSHA256V1(specValue) != speccontract.SemanticSpecSHA256V1(*bundle.SemanticSpec) || casePlan.SemanticSpecSHA256 != in.SemanticSpecArtifact.SHA256 || casePlan.AuthoringBundleSHA256 != in.AuthoringBundleArtifact.SHA256 {
 		return nil, s3ContractErrorV1("manifest SemanticSpec ancestry mismatch")
 	}
+	fullCase, err := validateCasePlanInputParserRuleV2(*casePlan, specValue)
+	if err != nil {
+		return nil, s3ContractErrorV1("manifest input parser rule: %v", err)
+	}
 	oracleBytes, err := a.readS3ArtifactV1(ctx, in.OracleReceiptArtifact, in.OracleReceiptArtifact.SHA256, "application/json", maxS3ManifestBytesV1)
 	if err != nil {
 		return nil, err
@@ -1244,11 +1250,15 @@ func (a *Activities) BuildS3TestManifestActivityV1(ctx context.Context, in S3Man
 		manifest.Cases[index] = TestManifestCaseV2{TestIndex: index, TestID: planCase.TestID, Purpose: planCase.Purpose, ConstraintRegion: planCase.ConstraintRegion, BoundaryRefs: append([]string(nil), planCase.BoundaryRefs...), Seed: &seed, InputArtifact: &inputRef, InputSHA256: inputRef.SHA256, OutputArtifact: outputRef, OutputSHA256: outputRef.SHA256, KilledWrongIDs: copyPresentS3StringsV1(planCase.KilledWrongIDs), KilledWrongIDsRetentionReason: planCase.KilledWrongIDsRetentionReason}
 		resolved[index] = IntegerBoundaryCoverageCaseInputV1{TestID: planCase.TestID, Input: string(inputBytes)}
 	}
-	coverage, err := ValidateIntegerBoundaryCoverageV1(specValue, *bundle.AuthoringPlan, manifest, resolved)
+	validateCoverage := ValidateIntegerBoundaryCoverageV1
+	if fullCase {
+		validateCoverage = ValidateTestCaseBoundaryCoverageV2
+	}
+	coverage, err := validateCoverage(specValue, *bundle.AuthoringPlan, manifest, resolved)
 	if err != nil {
 		return nil, s3QualityErrorV1("validate automatic boundary coverage: %v", err)
 	}
-	coverageBytes, coverageSHA, err := CanonicalIntegerBoundaryCoverageReceiptV1(*coverage)
+	coverageBytes, coverageSHA, err := CanonicalIntegerBoundaryCoverageReceiptV1(*coverage, boundaryCoverageReceiptRuleForSpecV1(specValue, fullCase))
 	if err != nil {
 		return nil, s3ContractErrorV1("canonicalize boundary coverage receipt: %v", err)
 	}
@@ -2093,6 +2103,19 @@ func (a *Activities) loadS3CasePlanV1(ctx context.Context, ref ArtifactRef) (*S3
 		return nil, nil, s3ContractErrorV1("S3 sanitizer suite identity is invalid")
 	}
 	return &plan, data, nil
+}
+
+func validateCasePlanInputParserRuleV2(plan S3CasePlanBundleV1, specValue domain.SemanticSpecV1) (bool, error) {
+	if plan.InputParserRuleVersion == "" {
+		if speccontract.SampleInputParserRuleVersionForSpecV1(specValue) != speccontract.SampleInputParserRuleVersionV1 {
+			return false, fmt.Errorf("string case plan requires an explicit input parser rule")
+		}
+		return false, nil
+	}
+	if plan.InputParserRuleVersion != speccontract.TestCaseInputParserRuleVersionForSpecV2(specValue) {
+		return false, fmt.Errorf("case plan input parser rule does not match its SemanticSpec and full-case phase")
+	}
+	return true, nil
 }
 
 func canonicalJSONBytesAndSHA256(value interface{}) ([]byte, string, error) {

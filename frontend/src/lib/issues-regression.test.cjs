@@ -51,3 +51,25 @@ test('code examples containing image syntax remain code',()=>{
  assert.doesNotMatch(render('```md\n![alt](https://example.test/a.png)\n```'),/<img /);
  assert.doesNotMatch(render('`![alt](https://example.test/a.png)`'),/<img /);
 });
+
+test('longer code fences preserve shorter backtick tokens and the following heading',()=>{
+ for (const [opening, literal, closing] of [['````text','```','````'],['`````text','````','`````'],['````text','```','`````']]) {
+  const body=literal+'\n```text\n`````text\n# literal heading\n![literal](https://example.test/a.png)\n$x$';
+  const html=render(opening+'\n'+body+'\n  '+closing+'  \n\n## 样例解释\n后续说明');
+  assert.match(html,/<code data-lang="text">/);
+  assert.ok(html.includes('<code data-lang="text">'+body+'</code>'));
+  assert.match(html,/<\/pre><h2[^>]*>样例解释<\/h2>/);
+  assert.match(html,/后续说明<\/p>/);
+  assert.equal((html.match(/<pre\b/g)||[]).length,1);
+  assert.doesNotMatch(html,/<img |<h1/);
+ }
+});
+
+test('ordinary cpp fences keep their language and require a pure closing fence',()=>{
+ const body='int main() { return 0; }\n```text\n``';
+ const html=render('```cpp\n'+body+'\n```\n## 解法\n![figure](https://example.test/a.png)');
+ assert.ok(html.includes('<code data-lang="cpp">'+body+'</code>'));
+ assert.match(html,/<\/pre><h2[^>]*>解法<\/h2>/);
+ assert.match(html,/<img /);
+ assert.doesNotMatch(html,/data-lang="`/);
+});

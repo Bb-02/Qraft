@@ -408,16 +408,19 @@ function renderMarkdown(md: string): React.ReactNode[] {
     }
 
     // ---- Code block ----
-    if (trimmed.startsWith('```')) {
-      const lang = trimmed.slice(3).trim();
+    const openingFence = trimmed.match(/^(`{3,})(.*)$/);
+    if (openingFence) {
+      const lang = openingFence[2].trim();
       const codeLines: string[] = [];
       i++;
-      while (i < lines.length && !lines[i].trim().startsWith('```')) {
+      while (i < lines.length) {
+        const closingFence = lines[i].trim();
+        if (/^`+$/.test(closingFence) && closingFence.length >= openingFence[1].length) break;
         codeLines.push(lines[i]);
         i++;
       }
       nodes.push(renderCodeBlock(codeLines, lang, `code-${i}`));
-      i++;
+      if (i < lines.length) i++;
       continue;
     }
 

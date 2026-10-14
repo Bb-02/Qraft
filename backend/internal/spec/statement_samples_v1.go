@@ -28,7 +28,7 @@ type StatementSampleV1 struct {
 
 // ValidateSampleInputProfileV1 validates the parser's deliberately narrow
 // support surface without requiring a candidate. This keeps zero-sample
-// statements fail closed for unsupported string/graph/tree/grid contracts.
+// statements fail closed for unsupported input contracts.
 func ValidateSampleInputProfileV1(semanticSpec domain.SemanticSpecV1) error {
 	parser := &sampleInputParserV1{
 		spec:     semanticSpec,
@@ -77,12 +77,22 @@ func ParseStatementSamplesV1(markdown string) ([]StatementSampleV1, error) {
 		return nil, err
 	}
 	if canonical != section {
-		return nil, fmt.Errorf("sample section is not canonical")
+		// Older records always used three backticks, including in the presence
+		// of embedded backticks. Keep their exact bytes readable; all new renders
+		// use the safe, content-derived fence. No other fence variation is valid.
+		legacy, err := renderStatementSampleSectionWithFencesV1(samples, false)
+		if err != nil || legacy != section {
+			return nil, fmt.Errorf("sample section is not canonical")
+		}
 	}
 	return samples, nil
 }
 
 func renderStatementSampleSectionV1(samples []StatementSampleV1) (string, error) {
+	return renderStatementSampleSectionWithFencesV1(samples, true)
+}
+
+func renderStatementSampleSectionWithFencesV1(samples []StatementSampleV1, safe bool) (string, error) {
 	if len(samples) > domain.MaxGeneratedTestCases {
 		return "", fmt.Errorf("sample count %d exceeds %d", len(samples), domain.MaxGeneratedTestCases)
 	}
@@ -97,14 +107,18 @@ func renderStatementSampleSectionV1(samples []StatementSampleV1) (string, error)
 		if err := validateStatementSampleTextV1("output", sample.Output); err != nil {
 			return "", fmt.Errorf("sample %d: %w", index+1, err)
 		}
-		appendStatementSampleBlockV1(&builder, "input", index+1, sample.Input)
-		appendStatementSampleBlockV1(&builder, "output", index+1, sample.Output)
+		appendStatementSampleBlockV1(&builder, "input", index+1, sample.Input, safe)
+		appendStatementSampleBlockV1(&builder, "output", index+1, sample.Output, safe)
 	}
 	builder.WriteString(statementSamplesEndV1)
 	return builder.String(), nil
 }
 
-func appendStatementSampleBlockV1(builder *strings.Builder, kind string, index int, value string) {
+func appendStatementSampleBlockV1(builder *strings.Builder, kind string, index int, value string, safe bool) {
+	fence := "```"
+	if safe {
+		fence = statementSampleFenceV1(value)
+	}
 	builder.WriteString("#### ")
 	builder.WriteString(kind)
 	builder.WriteString(strconv.Itoa(index))
@@ -112,12 +126,34 @@ func appendStatementSampleBlockV1(builder *strings.Builder, kind string, index i
 	builder.WriteString(strconv.Itoa(len(value)))
 	builder.WriteString(" sha256=")
 	builder.WriteString(statementSampleSHA256V1(value))
-	builder.WriteString("\n```text\n")
+	builder.WriteByte('\n')
+	builder.WriteString(fence)
+	builder.WriteString("text\n")
 	builder.WriteString(value)
 	if !strings.HasSuffix(value, "\n") {
 		builder.WriteByte('\n')
 	}
-	builder.WriteString("```\n")
+	builder.WriteString(fence)
+	builder.WriteByte('\n')
+}
+
+func statementSampleFenceV1(value string) string {
+	longest, current := 0, 0
+	for index := 0; index < len(value); index++ {
+		if value[index] == '`' {
+			current++
+			if current > longest {
+				longest = current
+			}
+		} else {
+			current = 0
+		}
+	}
+	length := longest + 1
+	if length < 3 {
+		length = 3
+	}
+	return strings.Repeat("`", length)
 }
 
 func parseStatementSampleSectionV1(section string) ([]StatementSampleV1, error) {
@@ -206,7 +242,8 @@ func (cursor *statementSampleCursorV1) block(kind string, expectedIndex int) (st
 		return "", fmt.Errorf("invalid %s%d byte/hash metadata", kind, expectedIndex)
 	}
 	opening, err := cursor.line()
-	if err != nil || opening != "```text" {
+	fence := strings.TrimSuffix(opening, "text")
+	if err != nil || !strings.HasSuffix(opening, "text") || len(fence) < 3 || strings.Trim(fence, "`") != "" {
 		return "", fmt.Errorf("expected canonical text fence for %s%d", kind, expectedIndex)
 	}
 	if len(cursor.data)-cursor.pos < size {
@@ -221,7 +258,7 @@ func (cursor *statementSampleCursorV1) block(kind string, expectedIndex int) (st
 		cursor.pos++
 	}
 	closing, err := cursor.line()
-	if err != nil || closing != "```" {
+	if err != nil || closing != fence {
 		return "", fmt.Errorf("expected canonical closing fence for %s%d", kind, expectedIndex)
 	}
 	if err := validateStatementSampleTextV1(kind, value); err != nil {

@@ -159,6 +159,10 @@ func (a *Activities) ValidateAuthoringSampleCandidatesActivityV1(
 	}
 
 	inputGrammarSHA := speccontract.InputGrammarSHA256V1(bundle.SemanticSpec.InputGrammar)
+	if err := speccontract.ValidateSampleInputProfileV1(*bundle.SemanticSpec); err != nil {
+		return nil, nonRetryableValidatedSampleCandidatesErrorV1(fmt.Errorf("unsupported input profile: %w", err))
+	}
+	parserRule := speccontract.SampleInputParserRuleVersionForSpecV1(*bundle.SemanticSpec)
 	if !statementDraftIsSHA256V1(inputGrammarSHA) {
 		return nil, nonRetryableValidatedSampleCandidatesErrorV1(fmt.Errorf("input grammar hash is invalid"))
 	}
@@ -171,7 +175,7 @@ func (a *Activities) ValidateAuthoringSampleCandidatesActivityV1(
 				fmt.Errorf("parse sample-input candidate %d: %w", index, err),
 			)
 		}
-		if err := validateParsedSampleInputReceiptV1(parsed, inputGrammarSHA); err != nil {
+		if err := validateParsedSampleInputReceiptV1(parsed, inputGrammarSHA, parserRule); err != nil {
 			return nil, nonRetryableValidatedSampleCandidatesErrorV1(
 				fmt.Errorf("validate sample-input candidate %d receipt: %w", index, err),
 			)
@@ -200,7 +204,7 @@ func (a *Activities) ValidateAuthoringSampleCandidatesActivityV1(
 		BriefSHA256:            in.ExpectedBriefSHA256,
 		SemanticSpecSHA256:     in.ExpectedSemanticSpecSHA256,
 		InputGrammarSHA256:     inputGrammarSHA,
-		ParserRuleVersion:      speccontract.SampleInputParserRuleVersionV1,
+		ParserRuleVersion:      parserRule,
 		DerivationRule:         validatedSampleCandidatesDerivationRuleV1,
 		RequestedTestCaseCount: bundle.RequestedTestCaseCount,
 		RequestedSampleCount:   bundle.RequestedSampleCount,
@@ -231,7 +235,7 @@ func (a *Activities) ValidateAuthoringSampleCandidatesActivityV1(
 		"brief_sha256":                   in.ExpectedBriefSHA256,
 		"semantic_spec_sha256":           in.ExpectedSemanticSpecSHA256,
 		"input_grammar_sha256":           inputGrammarSHA,
-		"parser_rule_version":            speccontract.SampleInputParserRuleVersionV1,
+		"parser_rule_version":            parserRule,
 		"derivation_rule":                validatedSampleCandidatesDerivationRuleV1,
 		"requested_test_case_count":      bundle.RequestedTestCaseCount,
 		"requested_sample_count":         bundle.RequestedSampleCount,
@@ -278,7 +282,7 @@ func (a *Activities) ValidateAuthoringSampleCandidatesActivityV1(
 		BriefSHA256:             in.ExpectedBriefSHA256,
 		SemanticSpecSHA256:      in.ExpectedSemanticSpecSHA256,
 		InputGrammarSHA256:      inputGrammarSHA,
-		ParserRuleVersion:       speccontract.SampleInputParserRuleVersionV1,
+		ParserRuleVersion:       parserRule,
 		RequestedTestCaseCount:  bundle.RequestedTestCaseCount,
 		MinTestCaseCount:        resultMinTestCases,
 		MaxTestCaseCount:        resultMaxTestCases,
@@ -365,8 +369,13 @@ func authoringSampleCandidatesRenderExpectationsV1(
 func validateParsedSampleInputReceiptV1(
 	parsed speccontract.ParsedSampleInputV1,
 	expectedGrammarSHA string,
+	expectedRules ...string,
 ) error {
-	if parsed.ParserRuleVersion != speccontract.SampleInputParserRuleVersionV1 {
+	expectedRule := speccontract.SampleInputParserRuleVersionV1
+	if len(expectedRules) == 1 {
+		expectedRule = expectedRules[0]
+	}
+	if len(expectedRules) > 1 || (expectedRule != speccontract.SampleInputParserRuleVersionV1 && expectedRule != speccontract.SampleInputParserTokenStringsRuleVersionV2) || parsed.ParserRuleVersion != expectedRule {
 		return fmt.Errorf("parser rule version mismatch")
 	}
 	if parsed.InputGrammarSHA256 != expectedGrammarSHA {
@@ -396,6 +405,9 @@ func cloneSampleInputBindingsV1(bindings []speccontract.SampleInputBindingV1) []
 		}
 		if binding.Integers != nil {
 			cloned[index].Integers = append([]int64(nil), binding.Integers...)
+		}
+		if binding.Strings != nil {
+			cloned[index].Strings = append([]string{}, binding.Strings...)
 		}
 	}
 	return cloned

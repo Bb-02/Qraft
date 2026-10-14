@@ -22,13 +22,13 @@ func DescribeFailure(err error) *domain.GenerationFailure {
 		}
 	}
 	failure := &domain.GenerationFailure{Code: "generation_failed", Message: "这道题未能完成生成", Suggestion: "查看生成任务了解失败阶段，修正需求或服务配置后重试。", TechnicalDetails: boundedFailureText(err.Error(), 6000)}
-	if unsupported := unsupportedInputFailure(err.Error()); unsupported != nil {
-		unsupported.TechnicalDetails = failure.TechnicalDetails
-		return unsupported
-	}
 	if formatted := modelOutputFailure(err.Error()); formatted != nil {
 		formatted.TechnicalDetails = failure.TechnicalDetails
 		return formatted
+	}
+	if unsupported := unsupportedInputFailure(err.Error()); unsupported != nil {
+		unsupported.TechnicalDetails = failure.TechnicalDetails
+		return unsupported
 	}
 	message := err.Error()
 	if application != nil {

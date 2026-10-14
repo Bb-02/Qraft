@@ -267,7 +267,7 @@ func validateStatementDraftForSampleClosureV1(draft StatementDraftBundleV1, auth
 
 func validateSampleCandidatesForClosureV1(validated ValidatedSampleCandidatesBundleV1, authoring AuthoringPlanBundleV1, semanticSHA, expectedAuthoringSHA, expectedValidatedSHA string) error {
 	if validated.SchemaVersion != ValidatedSampleCandidatesBundleSchemaV1 || validated.Status != ValidatedSampleCandidatesStatusInputsOnlyV1 ||
-		validated.DerivationRule != validatedSampleCandidatesDerivationRuleV1 || validated.ParserRuleVersion != speccontract.SampleInputParserRuleVersionV1 {
+		validated.DerivationRule != validatedSampleCandidatesDerivationRuleV1 || validated.ParserRuleVersion != speccontract.SampleInputParserRuleVersionForSpecV1(*authoring.SemanticSpec) {
 		return fmt.Errorf("unsupported validated-sample bundle schema/status")
 	}
 	if validated.AuthoringBundleSHA256 != expectedAuthoringSHA || validated.SemanticSpecSHA256 != semanticSHA ||
@@ -294,10 +294,11 @@ func validateSampleCandidatesForClosureV1(validated ValidatedSampleCandidatesBun
 		if err != nil {
 			return fmt.Errorf("reparse source sample %d: %w", index, err)
 		}
-		if candidate.SourceIndex != index || candidate.SemanticSpecSHA256 != semanticSHA ||
+		actualBindingSHA, bindingErr := canonicalJSONSHA256(candidate.Bindings)
+		if bindingErr != nil || actualBindingSHA != parsed.BindingSHA256 || candidate.SourceIndex != index || candidate.SemanticSpecSHA256 != semanticSHA ||
 			candidate.RawInputSHA256 != sha256Hex([]byte(authoring.SemanticSpec.SampleInputs[index])) ||
 			candidate.CanonicalInput != parsed.CanonicalInput || candidate.CanonicalInputSHA256 != parsed.CanonicalSHA256 ||
-			candidate.BindingSHA256 != parsed.BindingSHA256 || !reflect.DeepEqual(candidate.Bindings, parsed.Bindings) {
+			candidate.BindingSHA256 != parsed.BindingSHA256 {
 			return fmt.Errorf("validated sample %d receipt mismatch", index)
 		}
 	}
