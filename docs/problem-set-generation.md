@@ -73,6 +73,8 @@ Qraft 可以按一段需求生成纯编程比赛，也可以生成包含编程�
 
 题位状态 `awaiting_review` 表示已有候选等待审核。题位响应保留 `child_id`、`problem_id` 或 `quiz_id`，失败详情 `failure` 提供中文 `message`、处理建议 `suggestion`、未通过项 `blocking_issues` 和排查用的 `technical_details`。`difficulty_assessment` 保留 `target`、可选的 `estimated`、`delta` 和说明 `explanation`，题目元数据 `generation_difficulty` 保存同一评估。历史任务仅有 `error` 字符串时，客户端仍会归纳常见原因，并将原始内容放在技术详情中。
 
+测试数据生成直接请求完整 JSON，不依赖模型网关拼接预填的大括号。格式错误时最多进行一次独立缓存的纠正，原回复和纠正回复都保留；达到输出长度上限时明确报告截断。格式纠正不会跳过生成器执行、非空输入、题意约束、数量、覆盖或独立验证检查。重试产生的新任务仍须通过这些检查。
+
 自动生成入口由 `ALGOFORGE_CUSTOM_GENERATION_API_MODE=jobs-v1` 启用；可通过 `GET /api/v1/integration/capabilities` 的 `problem_sets.generation.enabled` 检查服务实际支持情况。题集管理、[题库组卷](problem-set-assembly.md) 和导出是独立能力。
 
 ## 题集导出

@@ -212,6 +212,7 @@ func (a *Activities) GenerateTestDataActivity(
 
 	stopHB := heartbeatWhile(ctx, "calling LLM to generate test data", 15*time.Second)
 	var importedResult *TestDataResult
+	var structuredResult *TestDataResult
 	var resp *llm.Response
 	var sourceArtifact *ArtifactRef
 	var sourceArtifacts []*ArtifactRef
@@ -229,7 +230,7 @@ func (a *Activities) GenerateTestDataActivity(
 			return nil
 		})
 	} else {
-		resp, sourceArtifact, err = a.completeLLMWithProvenance(ctx, "testdata_generator_v2", req, 2)
+		resp, sourceArtifact, sourceArtifacts, structuredResult, err = a.completeTestDataStructuredV3(ctx, req)
 	}
 	stopHB()
 	if err != nil {
@@ -245,7 +246,7 @@ func (a *Activities) GenerateTestDataActivity(
 		Int("response_len", len(responseText)).
 		Msg("LLM test data response received")
 
-	if resp.StopReason == "max_tokens" {
+	if modelResponseTruncatedV2(resp) {
 		log.Error().
 			Str("response_preview", truncate(responseText, 2000)).
 			Msg("test data response was truncated")
@@ -257,6 +258,9 @@ func (a *Activities) GenerateTestDataActivity(
 	}
 
 	result := importedResult
+	if result == nil {
+		result = structuredResult
+	}
 	if result == nil {
 		result, err = parseTestDataResponse(responseText)
 	}
