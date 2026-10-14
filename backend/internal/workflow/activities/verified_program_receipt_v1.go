@@ -117,14 +117,14 @@ func validateAuthoringSampleSandboxRunV1(
 			return fmt.Errorf("sample sandbox resource receipt %d is negative", index)
 		}
 	}
-	if output.Audit.RunID == "" || output.Audit.RunID != strings.TrimSpace(output.Audit.RunID) ||
-		output.Audit.ManifestDigest == "" || output.Audit.ManifestDigest != strings.TrimSpace(output.Audit.ManifestDigest) {
-		return fmt.Errorf("sample sandbox run lacks immutable run/manifest identity")
+	identity, err := s3SandboxRunIdentityV1(output, len(expectedInputSHA))
+	if err != nil {
+		return fmt.Errorf("sample sandbox execution evidence: %w", err)
 	}
-	if output.Audit.ImageDigest != receipt.SandboxImageDigest ||
-		output.Audit.ToolchainManifestDigest != receipt.ToolchainManifestDigest ||
-		output.Audit.SeccompPolicyDigest != receipt.SeccompPolicyDigest ||
-		output.Audit.LimitProfile != receipt.LimitProfile {
+	if identity.ImageDigest != receipt.SandboxImageDigest ||
+		identity.ToolchainManifestDigest != receipt.ToolchainManifestDigest ||
+		identity.SeccompPolicyDigest != receipt.SeccompPolicyDigest ||
+		identity.LimitProfile != receipt.LimitProfile {
 		return fmt.Errorf("sample sandbox environment does not match verified-program receipt")
 	}
 	return nil

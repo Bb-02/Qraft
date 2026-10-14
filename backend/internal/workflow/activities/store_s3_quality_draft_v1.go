@@ -220,6 +220,10 @@ func (a *Activities) buildS3QualityDraftStoreInputV1(ctx context.Context, in Sto
 		TimeTaken:       make([]time.Duration, len(outputArtifacts)),
 		MemoryUsed:      make([]int64, len(outputArtifacts)),
 		Audit:           oracleReceipt.SandboxIdentity,
+		Batches:         append([]SandboxExecutionBatch(nil), oracleReceipt.MainBatches...),
+	}
+	if len(sandboxOutput.Batches) != 0 {
+		sandboxOutput.Audit = SandboxAuditMetadata{}
 	}
 
 	qualityEvidence := &S3QualityPassDraftEvidenceV1{

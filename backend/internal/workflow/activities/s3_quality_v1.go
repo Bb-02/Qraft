@@ -703,6 +703,8 @@ type S3OracleGateReceiptV1 struct {
 	MainRunSHA256       string                    `json:"main_run_sha256,omitempty"`
 	OracleRunSHA256     string                    `json:"oracle_run_sha256,omitempty"`
 	SandboxIdentity     SandboxAuditMetadata      `json:"sandbox_identity"`
+	MainBatches         []SandboxExecutionBatch   `json:"main_batches,omitempty"`
+	OracleBatches       []SandboxExecutionBatch   `json:"oracle_batches,omitempty"`
 	FirstMismatchCaseID string                    `json:"first_mismatch_case_id,omitempty"`
 	Promotion           *OraclePromotionReceiptV1 `json:"promotion,omitempty"`
 }
@@ -778,10 +780,18 @@ func (a *Activities) VerifyProgramAgainstIndependentOracleActivityV1(ctx context
 	if len(mainOutputs) != len(caseIDs) || len(oracleOutputs) != len(caseIDs) {
 		return nil, s3ContractErrorV1("differential sandbox output count mismatch")
 	}
-	if !sameS3SandboxIdentityV1(mainRun.Audit, oracleRun.Audit) {
+	mainIdentity, err := s3SandboxRunIdentityV1(*mainRun, len(caseIDs))
+	if err != nil {
+		return nil, s3ContractErrorV1("main sandbox execution evidence: %v", err)
+	}
+	oracleIdentity, err := s3SandboxRunIdentityV1(*oracleRun, len(caseIDs))
+	if err != nil {
+		return nil, s3ContractErrorV1("oracle sandbox execution evidence: %v", err)
+	}
+	if !sameS3SandboxIdentityV1(mainIdentity, oracleIdentity) {
 		return nil, s3ContractErrorV1("main and independent oracle ran under different sandbox identities")
 	}
-	if err := a.validateS3SandboxIdentityPolicyV1(mainRun.Audit); err != nil {
+	if err := a.validateS3SandboxIdentityPolicyV1(mainIdentity); err != nil {
 		return nil, err
 	}
 	_, mainRunSHA, err := canonicalJSONBytesAndSHA256(*mainRun)
@@ -818,7 +828,8 @@ func (a *Activities) VerifyProgramAgainstIndependentOracleActivityV1(ctx context
 		SemanticSpecSHA256:  in.ExpectedSemanticSpecSHA256,
 		CandidateSHA256:     in.MainCandidate.CandidateSourceSHA256,
 		DifferentialCaseIDs: caseIDs, OrderedInputSHA256: inputSHA,
-		MainRunSHA256: mainRunSHA, OracleRunSHA256: oracleRunSHA, SandboxIdentity: mainRun.Audit,
+		MainRunSHA256: mainRunSHA, OracleRunSHA256: oracleRunSHA, SandboxIdentity: mainIdentity,
+		MainBatches: mainRun.Batches, OracleBatches: oracleRun.Batches,
 		FirstMismatchCaseID: firstMismatch, Promotion: receipt,
 	}
 	encoded, err := json.Marshal(gateReceipt)
@@ -839,7 +850,7 @@ func (a *Activities) VerifyProgramAgainstIndependentOracleActivityV1(ctx context
 		blockers = []qualitygate.ReviewBlockerV1{s3BlockerV1(code, s3ArtifactRefURI(in.MainCandidate.CandidateSourceArtifact), "algoforge.oracle-promotion.v1", fixture, "candidate must compile, be independent, and match the oracle on every differential case")}
 		return &S3OracleGateResultV1{PayloadVersion: S3QualityPayloadVersionV1, Gate: qualitygate.GateEvidenceV1{Status: status, Evidence: asset, Blockers: blockers}, ReceiptSHA256: ref.SHA256, ReceiptArtifact: ref, MainRun: mainRun, OracleRun: oracleRun}, nil
 	}
-	verified := VerifiedProgramReceiptV1{SchemaVersion: VerifiedProgramReceiptSchemaV1, Status: VerifiedProgramReceiptStatusV1, ProgramSHA256: in.MainCandidate.CandidateSourceSHA256, IndependentOracleReceiptSHA256: ref.SHA256, SandboxImageDigest: mainRun.Audit.ImageDigest, ToolchainManifestDigest: mainRun.Audit.ToolchainManifestDigest, SeccompPolicyDigest: mainRun.Audit.SeccompPolicyDigest, LimitProfile: mainRun.Audit.LimitProfile}
+	verified := VerifiedProgramReceiptV1{SchemaVersion: VerifiedProgramReceiptSchemaV1, Status: VerifiedProgramReceiptStatusV1, ProgramSHA256: in.MainCandidate.CandidateSourceSHA256, IndependentOracleReceiptSHA256: ref.SHA256, SandboxImageDigest: mainIdentity.ImageDigest, ToolchainManifestDigest: mainIdentity.ToolchainManifestDigest, SeccompPolicyDigest: mainIdentity.SeccompPolicyDigest, LimitProfile: mainIdentity.LimitProfile}
 	if err := validateVerifiedProgramReceiptV1(verified); err != nil {
 		return nil, s3ContractErrorV1("server verified-program receipt: %v", err)
 	}
@@ -950,24 +961,29 @@ func (a *Activities) RunVerifiedAuthoringSamplesActivityV1(ctx context.Context, 
 	// externalized large output; the final QG-03 artifact remains bounded.
 	run.Outputs = resolved
 	run.OutputArtifacts = nil
-	if run.Audit.ImageDigest != receipt.SandboxImageDigest || run.Audit.ToolchainManifestDigest != receipt.ToolchainManifestDigest || run.Audit.SeccompPolicyDigest != receipt.SeccompPolicyDigest || run.Audit.LimitProfile != receipt.LimitProfile {
+	identity, err := s3SandboxRunIdentityV1(*run, len(inputs))
+	if err != nil {
+		return nil, s3ContractErrorV1("sample sandbox execution evidence: %v", err)
+	}
+	if identity.ImageDigest != receipt.SandboxImageDigest || identity.ToolchainManifestDigest != receipt.ToolchainManifestDigest || identity.SeccompPolicyDigest != receipt.SeccompPolicyDigest || identity.LimitProfile != receipt.LimitProfile {
 		return nil, s3QualityErrorV1("sample sandbox environment differs from verified-program receipt")
 	}
 	return &AuthoringSampleSandboxRunV1{SchemaVersion: AuthoringSampleSandboxRunSchemaV1, Phase: in.Phase, VerifiedProgramReceiptSHA256: in.VerifiedProgramReceiptArtifact.SHA256, ProgramSHA256: receipt.ProgramSHA256, IndependentOracleReceiptSHA256: receipt.IndependentOracleReceiptSHA256, InputSHA256: inputSHA, SandboxOutput: *run}, nil
 }
 
 type S3SanitizerExecutionV1 struct {
-	SchemaVersion                string               `json:"schema_version"`
-	Profile                      string               `json:"profile"`
-	Language                     string               `json:"language"`
-	SemanticSpecSHA256           string               `json:"semantic_spec_sha256"`
-	CandidateSHA256              string               `json:"candidate_sha256"`
-	VerifiedProgramReceiptSHA256 string               `json:"verified_program_receipt_sha256"`
-	SmallSuiteSHA256             string               `json:"small_suite_sha256"`
-	CaseIDs                      []string             `json:"case_ids"`
-	Passed                       bool                 `json:"passed"`
-	FindingCodes                 []string             `json:"finding_codes"`
-	Audit                        SandboxAuditMetadata `json:"audit"`
+	SchemaVersion                string                  `json:"schema_version"`
+	Profile                      string                  `json:"profile"`
+	Language                     string                  `json:"language"`
+	SemanticSpecSHA256           string                  `json:"semantic_spec_sha256"`
+	CandidateSHA256              string                  `json:"candidate_sha256"`
+	VerifiedProgramReceiptSHA256 string                  `json:"verified_program_receipt_sha256"`
+	SmallSuiteSHA256             string                  `json:"small_suite_sha256"`
+	CaseIDs                      []string                `json:"case_ids"`
+	Passed                       bool                    `json:"passed"`
+	FindingCodes                 []string                `json:"finding_codes"`
+	Audit                        SandboxAuditMetadata    `json:"audit"`
+	Batches                      []SandboxExecutionBatch `json:"batches,omitempty"`
 }
 
 type S3SanitizerReceiptV1 struct {
@@ -1051,28 +1067,60 @@ func (a *Activities) RunSanitizerGateActivityV1(ctx context.Context, in S3Saniti
 	}
 	execution := S3SanitizerExecutionV1{SchemaVersion: S3SanitizerExecutionSchemaV1, Profile: remotesandbox.SanitizerCAndCPPProfileV1, Language: in.Language, SemanticSpecSHA256: casePlan.SemanticSpecSHA256, CandidateSHA256: in.CandidateArtifact.SHA256, VerifiedProgramReceiptSHA256: in.VerifiedProgramReceiptArtifact.SHA256, SmallSuiteSHA256: in.ExpectedSmallSuiteSHA256, CaseIDs: caseIDs, FindingCodes: []string{}}
 	status := qualitygate.GateStatusCheckFailed
-	executor, executorErr := a.remoteSandboxExecutor(a.sandboxBatchTimeout(len(inputs), in.Limits.TimeLimitMs))
-	if executorErr == nil {
-		limits := remotesandbox.NewRemoteLimits(in.Limits.TimeLimitMs, in.Limits.MemoryLimitMB)
-		limits.OutputLimitBytes = S3StableOutputLimitBytesV1
-		limits.Profile = remotesandbox.SanitizerCAndCPPProfileV1
-		remoteResult, executeErr := executor.Execute(ctx, in.Language, string(source), inputs, limits)
-		if executeErr == nil && remoteResult != nil {
-			execution.Audit = SandboxAuditMetadata{RunID: remoteResult.Audit.RunID, ManifestDigest: remoteResult.Audit.ManifestDigest, Seed: remoteResult.Audit.Seed, LimitProfile: remoteResult.Audit.LimitProfile, Profile: remoteResult.Audit.Profile, ImageDigest: remoteResult.Audit.ImageDigest, ToolchainManifestDigest: remoteResult.Audit.ToolchainManifestDigest, SeccompPolicyDigest: remoteResult.Audit.SeccompPolicyDigest}
-			if remoteResult.Audit.Profile != remotesandbox.SanitizerCAndCPPProfileV1 || !strings.HasSuffix(remoteResult.Audit.LimitProfile, ",profile="+remotesandbox.SanitizerCAndCPPProfileV1) || remoteResult.Audit.ImageDigest != verified.SandboxImageDigest || remoteResult.Audit.ToolchainManifestDigest != verified.ToolchainManifestDigest || remoteResult.Audit.SeccompPolicyDigest != verified.SeccompPolicyDigest || len(remoteResult.Results) != len(inputs) {
-				return nil, s3ContractErrorV1("sanitizer sandbox omitted the requested profile, trusted environment identity, or case results")
-			}
+	stableLimits := in.Limits
+	stableLimits.OutputLimitBytes = S3StableOutputLimitBytesV1
+	stableLimits.Profile = remotesandbox.SanitizerCAndCPPProfileV1
+	ranges, err := sandboxInputBatchRangesV1(inputs, stableLimits)
+	if err != nil {
+		return nil, s3ContractErrorV1("sanitizer batch plan: %v", err)
+	}
+	limits := remotesandbox.NewRemoteLimits(in.Limits.TimeLimitMs, in.Limits.MemoryLimitMB)
+	limits.OutputLimitBytes = S3StableOutputLimitBytesV1
+	limits.Profile = remotesandbox.SanitizerCAndCPPProfileV1
+	var firstAudit SandboxAuditMetadata
+	for _, span := range ranges {
+		executor, executorErr := a.remoteSandboxExecutor(a.sandboxBatchTimeout(span.end-span.first, in.Limits.TimeLimitMs))
+		if executorErr != nil {
+			status = qualitygate.GateStatusCheckFailed
+			break
+		}
+		recordSandboxHeartbeat(ctx, fmt.Sprintf("running sanitizer cases %d-%d", span.first+1, span.end))
+		remoteResult, executeErr := func() (*remotesandbox.RemoteExecuteResult, error) {
+			stopHeartbeat := startRemoteSandboxHeartbeat(ctx, "waiting for sanitizer sandbox execution", remoteSandboxHeartbeatInterval)
+			defer stopHeartbeat()
+			return executor.Execute(ctx, in.Language, string(source), inputs[span.first:span.end], limits)
+		}()
+		if executeErr != nil || remoteResult == nil {
+			status = qualitygate.GateStatusCheckFailed
+			break
+		}
+		audit := SandboxAuditMetadata{RunID: remoteResult.Audit.RunID, ManifestDigest: remoteResult.Audit.ManifestDigest, Seed: remoteResult.Audit.Seed, LimitProfile: remoteResult.Audit.LimitProfile, Profile: remoteResult.Audit.Profile, ImageDigest: remoteResult.Audit.ImageDigest, ToolchainManifestDigest: remoteResult.Audit.ToolchainManifestDigest, SeccompPolicyDigest: remoteResult.Audit.SeccompPolicyDigest}
+		if err := validateS3SandboxRequestIdentityV1(audit); err != nil || audit.Profile != remotesandbox.SanitizerCAndCPPProfileV1 || !strings.HasSuffix(audit.LimitProfile, ",profile="+remotesandbox.SanitizerCAndCPPProfileV1) || audit.ImageDigest != verified.SandboxImageDigest || audit.ToolchainManifestDigest != verified.ToolchainManifestDigest || audit.SeccompPolicyDigest != verified.SeccompPolicyDigest {
+			return nil, s3ContractErrorV1("sanitizer sandbox omitted the requested profile or trusted environment identity")
+		}
+		if span.first == 0 {
+			firstAudit = audit
 			status = qualitygate.GateStatusPass
-			if !remoteResult.Compile.Success {
+		} else if !sameS3SandboxIdentityV1(firstAudit, audit) || firstAudit.Seed != audit.Seed {
+			return nil, s3ContractErrorV1("sanitizer batches ran under different sandbox identities")
+		}
+		if len(ranges) == 1 {
+			execution.Audit = audit
+		} else {
+			execution.Batches = append(execution.Batches, SandboxExecutionBatch{FirstCase: span.first, CaseCount: span.end - span.first, Audit: audit})
+		}
+		if !remoteResult.Compile.Success {
+			status = qualitygate.GateStatusBlocked
+			execution.FindingCodes = []string{"sanitizer.compile_failed"}
+			break
+		}
+		if len(remoteResult.Results) != span.end-span.first {
+			return nil, s3ContractErrorV1("sanitizer sandbox omitted case results")
+		}
+		for _, item := range remoteResult.Results {
+			if item.Verdict != remotesandbox.VerdictOK {
 				status = qualitygate.GateStatusBlocked
-				execution.FindingCodes = []string{"sanitizer.compile_failed"}
-			}
-			for _, item := range remoteResult.Results {
-				if item.Verdict != remotesandbox.VerdictOK {
-					status = qualitygate.GateStatusBlocked
-					execution.FindingCodes = []string{"sanitizer.runtime_finding"}
-					break
-				}
+				execution.FindingCodes = []string{"sanitizer.runtime_finding"}
 			}
 		}
 	}
@@ -1190,8 +1238,10 @@ func (a *Activities) BuildS3TestManifestActivityV1(ctx context.Context, in S3Man
 			return nil, s3ContractErrorV1("oracle receipt case lineage differs from the D-side case plan")
 		}
 	}
+	mainIdentity, identityErr := s3SandboxRunIdentityV1(in.MainRun, len(casePlan.Cases))
 	_, actualMainRunSHA, err := canonicalJSONBytesAndSHA256(in.MainRun)
-	if err != nil || actualMainRunSHA != oracleReceipt.MainRunSHA256 || !sameS3SandboxIdentityV1(in.MainRun.Audit, oracleReceipt.SandboxIdentity) {
+	if err != nil || identityErr != nil || actualMainRunSHA != oracleReceipt.MainRunSHA256 ||
+		!sameS3SandboxIdentityV1(mainIdentity, oracleReceipt.SandboxIdentity) || !reflect.DeepEqual(in.MainRun.Batches, oracleReceipt.MainBatches) {
 		return nil, s3ContractErrorV1("main sandbox run was spliced from a different oracle verification")
 	}
 	verifiedBytes, err := a.readS3ArtifactV1(ctx, in.VerifiedProgramReceiptArtifact, in.VerifiedProgramReceiptArtifact.SHA256, "application/json", maxVerifiedProgramReceiptBytesV1)
@@ -1213,8 +1263,11 @@ func (a *Activities) BuildS3TestManifestActivityV1(ctx context.Context, in S3Man
 		return nil, s3ContractErrorV1("sanitizer receipt has an untrusted producer")
 	}
 	var sanitizerReceipt S3SanitizerReceiptV1
-	if err := decodeCanonicalSampleClosureJSONV1(sanitizerBytes, &sanitizerReceipt); err != nil || sanitizerReceipt.SchemaVersion != S3SanitizerReceiptSchemaV1 || !sanitizerReceipt.Execution.Passed || sanitizerReceipt.Execution.SemanticSpecSHA256 != in.SemanticSpecArtifact.SHA256 || sanitizerReceipt.Execution.CandidateSHA256 != oracleReceipt.CandidateSHA256 || sanitizerReceipt.Execution.VerifiedProgramReceiptSHA256 != in.VerifiedProgramReceiptArtifact.SHA256 || sanitizerReceipt.Execution.SmallSuiteSHA256 != casePlan.SanitizerSuiteSHA256 {
+	if err := decodeCanonicalSampleClosureJSONV1(sanitizerBytes, &sanitizerReceipt); err != nil || sanitizerReceipt.SchemaVersion != S3SanitizerReceiptSchemaV1 || !sanitizerReceipt.Execution.Passed || sanitizerReceipt.Execution.SemanticSpecSHA256 != in.SemanticSpecArtifact.SHA256 || sanitizerReceipt.Execution.CandidateSHA256 != oracleReceipt.CandidateSHA256 || sanitizerReceipt.Execution.VerifiedProgramReceiptSHA256 != in.VerifiedProgramReceiptArtifact.SHA256 || sanitizerReceipt.Execution.SmallSuiteSHA256 != casePlan.SanitizerSuiteSHA256 || !reflect.DeepEqual(sanitizerReceipt.Execution.CaseIDs, casePlan.SanitizerCaseIDs) {
 		return nil, s3ContractErrorV1("sanitizer receipt is not a canonical passing server result")
+	}
+	if err := validateS3SanitizerExecutionIdentityV1(sanitizerReceipt.Execution, *verified, len(casePlan.SanitizerCaseIDs)); err != nil {
+		return nil, s3ContractErrorV1("sanitizer execution evidence: %v", err)
 	}
 	planSHA, err := canonicalJSONSHA256(*bundle.AuthoringPlan)
 	if err != nil {
@@ -2161,7 +2214,11 @@ func (a *Activities) resolveS3SandboxOutputsV1(ctx context.Context, run SandboxR
 	}
 	resolved := make([]string, len(run.Outputs))
 	for index, ref := range run.OutputArtifacts {
-		if ref == nil || run.Outputs[index] != "" {
+		if ref == nil {
+			resolved[index] = run.Outputs[index]
+			continue
+		}
+		if run.Outputs[index] != "" {
 			return nil, s3ContractErrorV1("S3 sandbox output mixes inline and artifact bytes")
 		}
 		data, err := a.readS3ArtifactV1(ctx, *ref, ref.SHA256, ref.ContentType, remoteSandboxMaxOutputBytes)

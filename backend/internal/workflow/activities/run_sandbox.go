@@ -31,6 +31,9 @@ const (
 	remoteSandboxCompileTimeout   = 75 * time.Second
 	remoteSandboxMaxOutputBytes   = 8 << 20
 	remoteSandboxBatchOutputBytes = 64 << 20
+	remoteSandboxBatchInputBytes  = 32 << 20
+	remoteSandboxBatchTimeMS      = 120000
+	remoteSandboxBatchCases       = 256
 )
 
 var startRemoteSandboxHeartbeat = heartbeatWhile
@@ -92,32 +95,6 @@ func (a *Activities) RunSandboxActivity(
 		)
 	}
 
-	// Imported problems may legitimately print close to 8 MiB for one case.
-	// Keep each declared batch within 64 MiB without reducing that case's cap.
-	// Explicit output contracts and non-imported execution stay unchanged.
-	const importedBatchSize = remoteSandboxBatchOutputBytes / remoteSandboxMaxOutputBytes
-	if limits.UseDeploymentLimits && limits.OutputLimitBytes == 0 && len(testCases) > importedBatchSize {
-		combined := &SandboxResult{PayloadVersion: ActivityPayloadVersion}
-		for first := 0; first < len(testCases); first += importedBatchSize {
-			end := min(first+importedBatchSize, len(testCases))
-			batch, err := a.RunSandboxActivity(ctx, solution, testCases[first:end], limits)
-			if err != nil {
-				return nil, fmt.Errorf("imported sandbox cases %d-%d: %w", first+1, end, err)
-			}
-			if len(batch.Outputs) != end-first {
-				return nil, fmt.Errorf("imported sandbox batch returned an incomplete result")
-			}
-			combined.Outputs = append(combined.Outputs, batch.Outputs...)
-			refs := make([]*ArtifactRef, end-first)
-			copy(refs, batch.OutputArtifacts)
-			combined.OutputArtifacts = append(combined.OutputArtifacts, refs...)
-			combined.TimeTaken = append(combined.TimeTaken, batch.TimeTaken...)
-			combined.MemoryUsed = append(combined.MemoryUsed, batch.MemoryUsed...)
-			combined.Batches = append(combined.Batches, SandboxExecutionBatch{FirstCase: first, CaseCount: end - first, Audit: batch.Audit})
-		}
-		return combined, nil
-	}
-
 	inputs := make([]string, len(testCases))
 	for i, tc := range testCases {
 		recordSandboxHeartbeat(ctx, fmt.Sprintf("resolving test case %d/%d", i+1, len(testCases)))
@@ -140,6 +117,85 @@ func (a *Activities) RunSandboxActivity(
 			inputs[i] = string(data)
 		}
 	}
+
+	ranges, err := sandboxInputBatchRangesV1(inputs, limits)
+	if err != nil {
+		return nil, err
+	}
+	if len(ranges) <= 1 {
+		return a.runSandboxInputBatchV1(ctx, solution, inputs, limits)
+	}
+
+	// Each batch keeps the caller's fixed per-case contract. Record every real
+	// request receipt instead of claiming one request covered the combined run.
+	combined := &SandboxResult{PayloadVersion: ActivityPayloadVersion}
+	hasArtifacts := false
+	for _, span := range ranges {
+		batch, err := a.runSandboxInputBatchV1(ctx, solution, inputs[span.first:span.end], limits)
+		if err != nil {
+			return nil, fmt.Errorf("sandbox cases %d-%d: %w", span.first+1, span.end, err)
+		}
+		count := span.end - span.first
+		if batch == nil || len(batch.Outputs) != count || len(batch.TimeTaken) != count || len(batch.MemoryUsed) != count ||
+			(len(batch.OutputArtifacts) != 0 && len(batch.OutputArtifacts) != count) || len(batch.Batches) != 0 {
+			return nil, fmt.Errorf("sandbox cases %d-%d returned an incomplete batch result", span.first+1, span.end)
+		}
+		combined.Outputs = append(combined.Outputs, batch.Outputs...)
+		refs := make([]*ArtifactRef, count)
+		copy(refs, batch.OutputArtifacts)
+		combined.OutputArtifacts = append(combined.OutputArtifacts, refs...)
+		hasArtifacts = hasArtifacts || len(batch.OutputArtifacts) != 0
+		combined.TimeTaken = append(combined.TimeTaken, batch.TimeTaken...)
+		combined.MemoryUsed = append(combined.MemoryUsed, batch.MemoryUsed...)
+		combined.Batches = append(combined.Batches, SandboxExecutionBatch{FirstCase: span.first, CaseCount: count, Audit: batch.Audit})
+	}
+	if !hasArtifacts {
+		combined.OutputArtifacts = nil
+	}
+	return combined, nil
+}
+
+type sandboxInputBatchRangeV1 struct{ first, end int }
+
+func sandboxInputBatchRangesV1(inputs []string, limits ExecutionLimits) ([]sandboxInputBatchRangeV1, error) {
+	outputLimit := remotesandbox.NewRemoteLimits(limits.TimeLimitMs, limits.MemoryLimitMB).OutputLimitBytes
+	if limits.OutputLimitBytes > 0 {
+		if limits.OutputLimitBytes > remoteSandboxMaxOutputBytes {
+			return nil, fmt.Errorf("sandbox output limit %d exceeds %d", limits.OutputLimitBytes, remoteSandboxMaxOutputBytes)
+		}
+		outputLimit = limits.OutputLimitBytes
+	} else if limits.UseDeploymentLimits {
+		// Imported defaults may expand after OLE. Reserve that existing ceiling
+		// up front so a retry retains the same complete case batch.
+		outputLimit = remoteSandboxMaxOutputBytes
+	}
+	maxCount := min(remoteSandboxBatchCases, int(remoteSandboxBatchOutputBytes/outputLimit))
+	if limits.TimeLimitMs > 0 {
+		maxCount = min(maxCount, remoteSandboxBatchTimeMS/limits.TimeLimitMs)
+	}
+	if maxCount < 1 {
+		return nil, fmt.Errorf("one sandbox case exceeds the declared batch execution budget")
+	}
+	var ranges []sandboxInputBatchRangeV1
+	for first := 0; first < len(inputs); {
+		end, inputBytes := first, 0
+		for end < len(inputs) && end-first < maxCount {
+			if len(inputs[end]) > remoteSandboxBatchInputBytes {
+				return nil, fmt.Errorf("sandbox input case %d exceeds %d bytes", end+1, remoteSandboxBatchInputBytes)
+			}
+			if len(inputs[end]) > remoteSandboxBatchInputBytes-inputBytes {
+				break
+			}
+			inputBytes += len(inputs[end])
+			end++
+		}
+		ranges = append(ranges, sandboxInputBatchRangeV1{first: first, end: end})
+		first = end
+	}
+	return ranges, nil
+}
+
+func (a *Activities) runSandboxInputBatchV1(ctx context.Context, solution domain.Solution, inputs []string, limits ExecutionLimits) (*SandboxResult, error) {
 
 	timeout := a.sandboxBatchTimeout(len(inputs), limits.TimeLimitMs)
 	executor, err := a.remoteSandboxExecutor(timeout)
@@ -190,6 +246,9 @@ func (a *Activities) RunSandboxActivity(
 	if err != nil {
 		return nil, fmt.Errorf("remote sandbox execution: %w", err)
 	}
+	if remoteResult == nil {
+		return nil, fmt.Errorf("remote sandbox returned no execution result")
+	}
 	if !remoteResult.Compile.Success {
 		compileErr := fmt.Errorf("remote sandbox compilation failed: %s", boundedDiagnostic(remoteResult.Compile.Stderr))
 		if solution.SolutionType == domain.SolutionTypeBrute {
@@ -197,6 +256,9 @@ func (a *Activities) RunSandboxActivity(
 			return nil, temporal.NewNonRetryableApplicationError(message, "ReferenceSolutionFailure", compileErr)
 		}
 		return nil, compileErr
+	}
+	if len(remoteResult.Results) != len(inputs) {
+		return nil, fmt.Errorf("remote sandbox returned %d cases, want %d", len(remoteResult.Results), len(inputs))
 	}
 
 	result := &SandboxResult{
