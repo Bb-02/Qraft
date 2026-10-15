@@ -176,7 +176,7 @@ func (a *Activities) GenerateTestDataActivity(
 
 // The S3 adapter chooses its server-owned output/effect contract separately;
 // ordinary and source-preserving import generation retain their existing keys.
-func (a *Activities) generateTestDataActivity(ctx context.Context, statement string, config domain.TestDataConfig, params domain.ProblemGenParams, s3InputCoverageV5 bool) (*TestDataResult, error) {
+func (a *Activities) generateTestDataActivity(ctx context.Context, statement string, config domain.TestDataConfig, params domain.ProblemGenParams, s3InputCoverageV5 bool, s3CoverageV6 ...*S3TestDataCoverageV6) (*TestDataResult, error) {
 	if err := config.NormalizeForGeneration(); err != nil {
 		return nil, temporal.NewNonRetryableApplicationError(
 			"invalid test-data configuration: "+err.Error(),
@@ -235,6 +235,8 @@ func (a *Activities) generateTestDataActivity(ctx context.Context, statement str
 			importedResult = parsed
 			return nil
 		})
+	} else if len(s3CoverageV6) == 1 && s3CoverageV6[0] != nil {
+		resp, sourceArtifact, sourceArtifacts, structuredResult, err = a.completeS3TestDataStructuredV6(ctx, req)
 	} else {
 		resp, sourceArtifact, sourceArtifacts, structuredResult, err = a.completeTestDataStructuredV3(ctx, req, s3InputCoverageV5)
 	}
@@ -281,6 +283,10 @@ func (a *Activities) generateTestDataActivity(ctx context.Context, statement str
 		)
 	}
 	result.SourceArtifacts = sourceArtifacts
+	if len(s3CoverageV6) == 1 && s3CoverageV6[0] != nil {
+		contract := *s3CoverageV6[0]
+		result.S3Coverage = &contract
+	}
 	if len(sourceArtifacts) == 0 {
 		result.SourceArtifacts = append(result.SourceArtifacts, sourceArtifact)
 	}

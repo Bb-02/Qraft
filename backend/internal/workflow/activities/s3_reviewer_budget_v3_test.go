@@ -47,8 +47,8 @@ func TestS3ReviewerBudgetV3PreservesSelectedModelAndReasoning(t *testing.T) {
 			require.Len(t, provider.requests, 1)
 			request := provider.requests[0]
 			require.Equal(t, tc.maxTokens, request.MaxTokens)
-			require.Equal(t, "v3", request.PromptVersion)
-			require.Equal(t, "s3_strict_reviewer_v3", request.PromptID)
+			require.Equal(t, "v4", request.PromptVersion)
+			require.Equal(t, "s3_strict_reviewer_v4", request.PromptID)
 			if tc.runtime {
 				require.Equal(t, "synthetic-selected-reviewer", request.Model)
 				require.Equal(t, "openai-chat", request.Runtime.Protocol)
@@ -91,7 +91,7 @@ func TestS3ReviewerBudgetV3StillRejectsExhaustedReasoningAfterOneBudgetRetry(t *
 			retained++
 			require.Contains(t, []int{32768, 65536}, recorded.Response.Usage.OutputTokens)
 			require.Empty(t, recorded.Response.Text())
-			require.Equal(t, "v3", recorded.CallReceipt.PromptVersion)
+			require.Equal(t, "v4", recorded.CallReceipt.PromptVersion)
 		}
 	}
 	require.Equal(t, 2, retained, "both failed responses remain available as provenance")
@@ -131,10 +131,10 @@ func TestS3ReviewerBudgetV3UsesOneExpansionAndPreservesCachedCalls(t *testing.T)
 		ids       []string
 		budgets   []int
 	}{
-		{name: "complete initial response remains one paid call", responses: []*llm.Response{reviewerFormatResponseV2(valid, "stop")}, ids: []string{"s3_strict_reviewer_v3"}, budgets: []int{32768}},
-		{name: "initial expansion", responses: []*llm.Response{reviewerFormatResponseV2("", "max_tokens"), reviewerFormatResponseV2(valid, "stop")}, ids: []string{"s3_strict_reviewer_v3", "s3_strict_reviewer_v3_reasoning_budget_retry_1"}, budgets: []int{32768, 65536}},
-		{name: "format after initial expansion", responses: []*llm.Response{reviewerFormatResponseV2("", "max_tokens"), reviewerFormatResponseV2(bad, "stop"), reviewerFormatResponseV2(valid, "stop")}, ids: []string{"s3_strict_reviewer_v3", "s3_strict_reviewer_v3_reasoning_budget_retry_1", "s3_strict_reviewer_v3_reasoning_budget_retry_1_format_repair_1"}, budgets: []int{32768, 65536, 65536}},
-		{name: "expansion during format correction", responses: []*llm.Response{reviewerFormatResponseV2(bad, "stop"), reviewerFormatResponseV2("", "length"), reviewerFormatResponseV2(valid, "stop")}, ids: []string{"s3_strict_reviewer_v3", "s3_strict_reviewer_v3_format_repair_1", "s3_strict_reviewer_v3_format_repair_1_reasoning_budget_retry_1"}, budgets: []int{32768, 32768, 65536}},
+		{name: "complete initial response remains one paid call", responses: []*llm.Response{reviewerFormatResponseV2(valid, "stop")}, ids: []string{"s3_strict_reviewer_v4"}, budgets: []int{32768}},
+		{name: "initial expansion", responses: []*llm.Response{reviewerFormatResponseV2("", "max_tokens"), reviewerFormatResponseV2(valid, "stop")}, ids: []string{"s3_strict_reviewer_v4", "s3_strict_reviewer_v4_reasoning_budget_retry_1"}, budgets: []int{32768, 65536}},
+		{name: "format after initial expansion", responses: []*llm.Response{reviewerFormatResponseV2("", "max_tokens"), reviewerFormatResponseV2(bad, "stop"), reviewerFormatResponseV2(valid, "stop")}, ids: []string{"s3_strict_reviewer_v4", "s3_strict_reviewer_v4_reasoning_budget_retry_1", "s3_strict_reviewer_v4_reasoning_budget_retry_1_format_repair_1"}, budgets: []int{32768, 65536, 65536}},
+		{name: "expansion during format correction", responses: []*llm.Response{reviewerFormatResponseV2(bad, "stop"), reviewerFormatResponseV2("", "length"), reviewerFormatResponseV2(valid, "stop")}, ids: []string{"s3_strict_reviewer_v4", "s3_strict_reviewer_v4_format_repair_1", "s3_strict_reviewer_v4_format_repair_1_reasoning_budget_retry_1"}, budgets: []int{32768, 32768, 65536}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			provider := &reviewerFormatLLMV2{responses: tc.responses}
@@ -150,7 +150,7 @@ func TestS3ReviewerBudgetV3UsesOneExpansionAndPreservesCachedCalls(t *testing.T)
 			for i, request := range provider.requests {
 				require.Equal(t, tc.budgets[i], request.MaxTokens)
 				require.Equal(t, tc.ids[i], request.PromptID)
-				require.Equal(t, "v3", request.PromptVersion)
+				require.Equal(t, "v4", request.PromptVersion)
 				require.Equal(t, "high", request.Runtime.ReasoningEffort)
 				require.Equal(t, "synthetic-selected-reviewer", request.Model)
 				require.Equal(t, provider.requests[0].System, request.System)
@@ -207,7 +207,7 @@ func TestS3ReviewerBudgetV3RedeliveryReusesPaidCallsAndKeepsLegacyEffects(t *tes
 	env := suite.NewTestWorkflowEnvironment()
 	env.RegisterActivityWithOptions(func(ctx context.Context, input S3StrictReviewerInputV1) (*S3StrictReviewerResultV1, error) {
 		if len(legacy) == 0 {
-			for _, step := range []string{"s3_strict_reviewer_v2", "s3_strict_reviewer_v2_format_repair_1"} {
+			for _, step := range []string{"s3_strict_reviewer_v2", "s3_strict_reviewer_v2_format_repair_1", "s3_strict_reviewer_v3", "s3_strict_reviewer_v3_format_repair_1", "s3_strict_reviewer_v3_reasoning_budget_retry_1", "s3_strict_reviewer_v3_reasoning_budget_retry_1_format_repair_1", "s3_strict_reviewer_v3_format_repair_1_reasoning_budget_retry_1"} {
 				key, err := temporalProviderEffectKey(ctx, "llm:"+step)
 				require.NoError(t, err)
 				entry := reviewerFormatCachedCallV2{request: "synthetic-legacy-v2-request", result: json.RawMessage(`{"synthetic_legacy":true}`)}
@@ -231,7 +231,7 @@ func TestS3ReviewerBudgetV3RedeliveryReusesPaidCallsAndKeepsLegacyEffects(t *tes
 	var result S3StrictReviewerResultV1
 	require.NoError(t, env.GetWorkflowResult(&result))
 	require.Len(t, provider.requests, 2, "redelivery must reuse both paid effects")
-	require.Len(t, cache, 4, "v3 initial and correction effects must not collide with v2")
+	require.Len(t, cache, len(legacy)+2, "v4 initial and correction effects must not collide with older contexts")
 	for key, entry := range legacy {
 		require.Equal(t, entry, cache[key], "existing v2 evidence must remain unchanged")
 	}
@@ -239,8 +239,8 @@ func TestS3ReviewerBudgetV3RedeliveryReusesPaidCallsAndKeepsLegacyEffects(t *tes
 		require.Equal(t, 32768, request.MaxTokens)
 		require.Equal(t, "high", request.Runtime.ReasoningEffort)
 		require.Equal(t, "synthetic-selected-reviewer", request.Model)
-		require.Equal(t, "v3", request.PromptVersion)
-		require.Equal(t, []string{"s3_strict_reviewer_v3", "s3_strict_reviewer_v3_format_repair_1"}[i], request.PromptID)
+		require.Equal(t, "v4", request.PromptVersion)
+		require.Equal(t, []string{"s3_strict_reviewer_v4", "s3_strict_reviewer_v4_format_repair_1"}[i], request.PromptID)
 		require.Equal(t, first.SourceArtifacts[i].SHA256, result.SourceArtifacts[i].SHA256)
 	}
 	require.False(t, *result.Reviewer.Assessment.Approved)
@@ -309,7 +309,7 @@ func TestS3ReviewerHeartbeatV3CoversSlowInitialCallAndFormatCorrection(t *testin
 	require.NoError(t, value.Get(&result))
 	require.Len(t, observed, 2)
 	for i, current := range observed {
-		require.Equal(t, []string{"s3_strict_reviewer_v3", "s3_strict_reviewer_v3_format_repair_1"}[i], current.promptID)
+		require.Equal(t, []string{"s3_strict_reviewer_v4", "s3_strict_reviewer_v4_format_repair_1"}[i], current.promptID)
 		require.Greater(t, current.elapsed, time.Minute)
 		require.GreaterOrEqual(t, current.heartbeats, int32(2))
 		require.Less(t, current.recent, 30*time.Second)

@@ -52,7 +52,11 @@ func reviewerAssessmentJSONV2(t *testing.T, correctness int) string {
 func reviewerFormatFixtureV2(t *testing.T, provider *reviewerFormatLLMV2) (*Activities, *oracleMemoryArtifactStore, S3StrictReviewerInputV1) {
 	t.Helper()
 	store := newOracleMemoryArtifactStore()
-	_, _, manifest, _ := validIntegerCoverageFixtureV1(t)
+	_, _, manifest, inputs := validIntegerCoverageFixtureV1(t)
+	for i, item := range manifest.Cases {
+		store.objects[item.InputSHA256] = []byte(inputs[i].Input)
+		store.objects[item.OutputSHA256] = []byte(strings.TrimSpace(inputs[i].Input) + "\n")
+	}
 	encoded, _, err := CanonicalTestManifestV2JSON(manifest)
 	require.NoError(t, err)
 	in := S3StrictReviewerInputV1{PayloadVersion: S3QualityPayloadVersionV1, SubjectID: "synthetic-reviewer-format", SubjectRevision: strings.Repeat("b", 64), TestManifestArtifact: s3SeedArtifactForTest(store, encoded, "application/json", "BuildS3TestManifestActivityV1")}
@@ -95,8 +99,8 @@ func TestS3ReviewerFormatV2RepairsOneMalformedReplyAndRetainsBothSources(t *test
 		var recorded recordedLLMResponse
 		require.NoError(t, json.Unmarshal(store.objects[source.SHA256], &recorded))
 		require.Equal(t, []string{bad, valid}[i], recorded.Response.Text())
-		require.Equal(t, "v3", recorded.CallReceipt.PromptVersion)
-		require.Equal(t, []string{s3ReviewerPromptIDV3, s3ReviewerFormatRepairPromptIDV3}[i], recorded.CallReceipt.PromptID)
+		require.Equal(t, "v4", recorded.CallReceipt.PromptVersion)
+		require.Equal(t, []string{s3ReviewerPromptIDV4, s3ReviewerFormatRepairPromptIDV4}[i], recorded.CallReceipt.PromptID)
 	}
 	require.NotEqual(t, result.SourceArtifacts[0].LLMCallReceipt.RequestSHA256, result.SourceArtifacts[1].LLMCallReceipt.RequestSHA256)
 	require.Contains(t, provider.requests[0].System, `"additionalProperties":false`)

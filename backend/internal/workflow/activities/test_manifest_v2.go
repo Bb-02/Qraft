@@ -66,6 +66,7 @@ type TestManifestCaseV2 struct {
 	OutputSHA256                  string       `json:"output_sha256"`
 	KilledWrongIDs                []string     `json:"killed_wrong_ids"`
 	KilledWrongIDsRetentionReason string       `json:"killed_wrong_ids_retention_reason"`
+	RegionObligationIDs           []string     `json:"region_obligation_ids,omitempty"`
 }
 
 func (manifest TestManifestV2) Validate() error {
@@ -79,10 +80,13 @@ func validateTestManifestV2Core(manifest TestManifestV2, requireBoundaryReceipt 
 	if manifest.SchemaVersion != TestManifestSchemaVersionV2 {
 		return fmt.Errorf("unsupported TestManifest schema %q", manifest.SchemaVersion)
 	}
-	if manifest.ConstraintRegionRuleVersion != "" && manifest.ConstraintRegionRuleVersion != ConstraintRegionMatchingRuleVersionV2 && manifest.ConstraintRegionRuleVersion != ConstraintRegionMatchingRuleVersionV3 {
+	if manifest.ConstraintRegionRuleVersion != "" && manifest.ConstraintRegionRuleVersion != ConstraintRegionMatchingRuleVersionV2 && manifest.ConstraintRegionRuleVersion != ConstraintRegionMatchingRuleVersionV3 && manifest.ConstraintRegionRuleVersion != ConstraintRegionAssociationRuleVersionV4 {
 		return fmt.Errorf("unsupported TestManifest constraint-region rule %q", manifest.ConstraintRegionRuleVersion)
 	}
 	if err := validateManifestConstraintRegionWitnessesV2(manifest, requireBoundaryReceipt); err != nil {
+		return err
+	}
+	if err := validateExplicitManifestRegionAssociationsV4(manifest, requireBoundaryReceipt); err != nil {
 		return err
 	}
 	for name, value := range map[string]string{
@@ -393,6 +397,9 @@ type IntegerBoundaryCoverageReceiptV1 struct {
 	InputParserRuleVersion      string                      `json:"input_parser_rule_version,omitempty"`
 	ConstraintRegionRuleVersion string                      `json:"constraint_region_rule_version,omitempty"`
 	RegionWitnesses             []ConstraintRegionWitnessV2 `json:"region_witnesses,omitempty"`
+	// This describes checked association/boundary prerequisites, not a proof
+	// of arbitrary natural-language constraint_region predicates.
+	RegionEvidenceKind string `json:"region_evidence_kind,omitempty"`
 }
 
 // ValidateIntegerBoundaryCoverageV1 reparses exact input bytes and proves that
@@ -418,10 +425,11 @@ func validateBoundaryCoverageWithInputPhaseV1(specValue domain.SemanticSpecV1, p
 	if err != nil {
 		return nil, err
 	}
-	multiRegion := manifest.ConstraintRegionRuleVersion == ConstraintRegionMatchingRuleVersionV2 || manifest.ConstraintRegionRuleVersion == ConstraintRegionMatchingRuleVersionV3
+	explicitRegion := manifest.ConstraintRegionRuleVersion == ConstraintRegionAssociationRuleVersionV4
+	multiRegion := manifest.ConstraintRegionRuleVersion == ConstraintRegionMatchingRuleVersionV2 || manifest.ConstraintRegionRuleVersion == ConstraintRegionMatchingRuleVersionV3 || explicitRegion
 	constraints, boundaries := specValue.Constraints, specValue.Boundaries
 	derive := DeriveIntegerBoundaryCasePlanV1
-	if manifest.ConstraintRegionRuleVersion == ConstraintRegionMatchingRuleVersionV3 {
+	if manifest.ConstraintRegionRuleVersion == ConstraintRegionMatchingRuleVersionV3 || explicitRegion {
 		scope, scopeErr := deriveInputBoundaryCoverageScopeV3(specValue)
 		if scopeErr != nil {
 			return nil, scopeErr
@@ -469,6 +477,7 @@ func validateBoundaryCoverageWithInputPhaseV1(specValue domain.SemanticSpecV1, p
 	}
 	regionCases := make([]regionCaseV1, 0, len(manifest.Cases))
 	witnessCases := make([]ConstraintRegionCaseWitnessV2, 0, len(manifest.Cases))
+	associationCases := make([]ConstraintRegionCaseAssociationV4, 0, len(manifest.Cases))
 	casePlan := make([]interface{}, 0, len(manifest.Cases))
 	for _, item := range manifest.Cases {
 		raw, exists := inputByID[item.TestID]
@@ -504,6 +513,7 @@ func validateBoundaryCoverageWithInputPhaseV1(specValue domain.SemanticSpecV1, p
 		}
 		regionCases = append(regionCases, regionCaseV1{region: item.ConstraintRegion, refs: caseRefs})
 		witnessCases = append(witnessCases, ConstraintRegionCaseWitnessV2{TestID: item.TestID, InputSHA256: item.InputSHA256, BoundaryRefs: copyPresentS3StringsV1(item.BoundaryRefs)})
+		associationCases = append(associationCases, ConstraintRegionCaseAssociationV4{ConstraintRegionCaseWitnessV2: witnessCases[len(witnessCases)-1], RegionObligationIDs: item.RegionObligationIDs})
 		for _, constraint := range constraints {
 			if constraint.Min == nil || constraint.Max == nil {
 				return nil, fmt.Errorf("constraint %s/%s has no closed range", constraint.Subject, constraint.Kind)
@@ -519,13 +529,14 @@ func validateBoundaryCoverageWithInputPhaseV1(specValue domain.SemanticSpecV1, p
 			}
 		}
 		casePlan = append(casePlan, struct {
-			TestID           string   `json:"test_id"`
-			Purpose          string   `json:"purpose"`
-			ConstraintRegion string   `json:"constraint_region"`
-			BoundaryRefs     []string `json:"boundary_refs"`
-			Seed             int64    `json:"seed"`
-			InputSHA256      string   `json:"input_sha256"`
-		}{item.TestID, item.Purpose, item.ConstraintRegion, item.BoundaryRefs, *item.Seed, item.InputSHA256})
+			TestID              string   `json:"test_id"`
+			Purpose             string   `json:"purpose"`
+			ConstraintRegion    string   `json:"constraint_region"`
+			BoundaryRefs        []string `json:"boundary_refs"`
+			Seed                int64    `json:"seed"`
+			InputSHA256         string   `json:"input_sha256"`
+			RegionObligationIDs []string `json:"region_obligation_ids,omitempty"`
+		}{item.TestID, item.Purpose, item.ConstraintRegion, item.BoundaryRefs, *item.Seed, item.InputSHA256, item.RegionObligationIDs})
 	}
 
 	wantEdges := make([]string, 0, len(constraints)*2)
@@ -570,7 +581,11 @@ func validateBoundaryCoverageWithInputPhaseV1(specValue domain.SemanticSpecV1, p
 	}
 	var regionWitnesses []ConstraintRegionWitnessV2
 	if multiRegion {
-		regionWitnesses, err = DeriveConstraintRegionWitnessesV2(*derivedPlan, witnessCases)
+		if explicitRegion {
+			regionWitnesses, err = DeriveConstraintRegionAssociationsV4(*derivedPlan, associationCases)
+		} else {
+			regionWitnesses, err = DeriveConstraintRegionWitnessesV2(*derivedPlan, witnessCases)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -596,6 +611,9 @@ func validateBoundaryCoverageWithInputPhaseV1(specValue domain.SemanticSpecV1, p
 	}
 	if fullCase {
 		receipt.InputParserRuleVersion = speccontract.TestCaseInputParserRuleVersionForSpecV2(specValue)
+	}
+	if explicitRegion {
+		receipt.RegionEvidenceKind = RegionEvidenceExplicitAssociationV4
 	}
 	return receipt, nil
 }
@@ -695,21 +713,28 @@ func CanonicalIntegerBoundaryCoverageReceiptV1(receipt IntegerBoundaryCoverageRe
 		return nil, "", fmt.Errorf("invalid integer boundary coverage receipt")
 	}
 	expectedParser := ""
-	if receipt.RuleVersion == FullCaseIntegerBoundaryCoverageRuleVersionV2 || receipt.RuleVersion == FullCaseIntegerMultiRegionCoverageRuleVersionV3 || receipt.RuleVersion == FullCaseIntegerInputScopeCoverageRuleVersionV4 {
+	explicitRegion := receipt.RuleVersion == FullCaseIntegerExplicitRegionCoverageRuleVersionV5 || receipt.RuleVersion == FullCaseTokenStringExplicitRegionCoverageRuleVersionV5
+	if receipt.RuleVersion == FullCaseIntegerBoundaryCoverageRuleVersionV2 || receipt.RuleVersion == FullCaseIntegerMultiRegionCoverageRuleVersionV3 || receipt.RuleVersion == FullCaseIntegerInputScopeCoverageRuleVersionV4 || receipt.RuleVersion == FullCaseIntegerExplicitRegionCoverageRuleVersionV5 {
 		expectedParser = speccontract.TestCaseInputParserRuleVersionV2
 	}
-	if receipt.RuleVersion == FullCaseTokenStringBoundaryCoverageRuleVersionV2 || receipt.RuleVersion == FullCaseTokenStringMultiRegionCoverageRuleVersionV3 || receipt.RuleVersion == FullCaseTokenStringInputScopeCoverageRuleVersionV4 {
+	if receipt.RuleVersion == FullCaseTokenStringBoundaryCoverageRuleVersionV2 || receipt.RuleVersion == FullCaseTokenStringMultiRegionCoverageRuleVersionV3 || receipt.RuleVersion == FullCaseTokenStringInputScopeCoverageRuleVersionV4 || receipt.RuleVersion == FullCaseTokenStringExplicitRegionCoverageRuleVersionV5 {
 		expectedParser = speccontract.TestCaseInputParserTokenStringsRuleVersionV2
 	}
 	if receipt.InputParserRuleVersion != expectedParser {
 		return nil, "", fmt.Errorf("boundary coverage input parser rule mismatch")
 	}
-	inputScope := receipt.RuleVersion == FullCaseIntegerInputScopeCoverageRuleVersionV4 || receipt.RuleVersion == FullCaseTokenStringInputScopeCoverageRuleVersionV4
+	if (explicitRegion && receipt.RegionEvidenceKind != RegionEvidenceExplicitAssociationV4) || (!explicitRegion && receipt.RegionEvidenceKind != "") {
+		return nil, "", fmt.Errorf("boundary coverage region evidence kind mismatch")
+	}
+	inputScope := receipt.RuleVersion == FullCaseIntegerInputScopeCoverageRuleVersionV4 || receipt.RuleVersion == FullCaseTokenStringInputScopeCoverageRuleVersionV4 || explicitRegion
 	multiRegion := receipt.RuleVersion == FullCaseIntegerMultiRegionCoverageRuleVersionV3 || receipt.RuleVersion == FullCaseTokenStringMultiRegionCoverageRuleVersionV3 || inputScope
 	if multiRegion {
 		expectedRegionRule := ConstraintRegionMatchingRuleVersionV2
 		if inputScope {
 			expectedRegionRule = ConstraintRegionMatchingRuleVersionV3
+		}
+		if explicitRegion {
+			expectedRegionRule = ConstraintRegionAssociationRuleVersionV4
 		}
 		if receipt.ConstraintRegionRuleVersion != expectedRegionRule {
 			return nil, "", fmt.Errorf("boundary coverage constraint-region rule mismatch")
@@ -752,15 +777,21 @@ func boundaryCoverageExpectedRuleV1(actual string, expectedRules []string) bool 
 	if len(expectedRules) == 1 {
 		expected = expectedRules[0]
 	}
-	return len(expectedRules) <= 1 && (expected == IntegerBoundaryCoverageRuleVersion || expected == TokenStringBoundaryCoverageRuleVersionV2 || expected == FullCaseIntegerBoundaryCoverageRuleVersionV2 || expected == FullCaseTokenStringBoundaryCoverageRuleVersionV2 || expected == FullCaseIntegerMultiRegionCoverageRuleVersionV3 || expected == FullCaseTokenStringMultiRegionCoverageRuleVersionV3 || expected == FullCaseIntegerInputScopeCoverageRuleVersionV4 || expected == FullCaseTokenStringInputScopeCoverageRuleVersionV4) && actual == expected
+	return len(expectedRules) <= 1 && (expected == IntegerBoundaryCoverageRuleVersion || expected == TokenStringBoundaryCoverageRuleVersionV2 || expected == FullCaseIntegerBoundaryCoverageRuleVersionV2 || expected == FullCaseTokenStringBoundaryCoverageRuleVersionV2 || expected == FullCaseIntegerMultiRegionCoverageRuleVersionV3 || expected == FullCaseTokenStringMultiRegionCoverageRuleVersionV3 || expected == FullCaseIntegerInputScopeCoverageRuleVersionV4 || expected == FullCaseTokenStringInputScopeCoverageRuleVersionV4 || expected == FullCaseIntegerExplicitRegionCoverageRuleVersionV5 || expected == FullCaseTokenStringExplicitRegionCoverageRuleVersionV5) && actual == expected
 }
 
 func boundaryCoverageReceiptRuleForManifestV2(specValue domain.SemanticSpecV1, fullCase bool, regionRule string) (string, error) {
 	if regionRule == "" {
 		return boundaryCoverageReceiptRuleForSpecV1(specValue, fullCase), nil
 	}
-	if (regionRule != ConstraintRegionMatchingRuleVersionV2 && regionRule != ConstraintRegionMatchingRuleVersionV3) || !fullCase {
+	if (regionRule != ConstraintRegionMatchingRuleVersionV2 && regionRule != ConstraintRegionMatchingRuleVersionV3 && regionRule != ConstraintRegionAssociationRuleVersionV4) || !fullCase {
 		return "", fmt.Errorf("constraint-region rule does not match the full-case input phase")
+	}
+	if regionRule == ConstraintRegionAssociationRuleVersionV4 {
+		if speccontract.SampleInputParserRuleVersionForSpecV1(specValue) == speccontract.SampleInputParserTokenStringsRuleVersionV2 {
+			return FullCaseTokenStringExplicitRegionCoverageRuleVersionV5, nil
+		}
+		return FullCaseIntegerExplicitRegionCoverageRuleVersionV5, nil
 	}
 	if regionRule == ConstraintRegionMatchingRuleVersionV3 {
 		if speccontract.SampleInputParserRuleVersionForSpecV1(specValue) == speccontract.SampleInputParserTokenStringsRuleVersionV2 {

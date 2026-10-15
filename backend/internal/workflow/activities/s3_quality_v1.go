@@ -352,15 +352,16 @@ type GenerateMainSolutionInputV1 struct {
 }
 
 type GenerateMainSolutionResultV1 struct {
-	PayloadVersion           int          `json:"payload_version"`
-	SchemaVersion            string       `json:"schema_version"`
-	AuthoringBundleSHA256    string       `json:"authoring_bundle_sha256"`
-	StatementDraftSHA256     string       `json:"statement_draft_sha256"`
-	SemanticSpecSHA256       string       `json:"semantic_spec_sha256"`
-	Language                 string       `json:"language"`
-	CandidateSourceSHA256    string       `json:"candidate_source_sha256"`
-	CandidateSourceArtifact  *ArtifactRef `json:"candidate_source_artifact"`
-	ProviderResponseArtifact *ArtifactRef `json:"provider_response_artifact"`
+	PayloadVersion           int            `json:"payload_version"`
+	SchemaVersion            string         `json:"schema_version"`
+	AuthoringBundleSHA256    string         `json:"authoring_bundle_sha256"`
+	StatementDraftSHA256     string         `json:"statement_draft_sha256"`
+	SemanticSpecSHA256       string         `json:"semantic_spec_sha256"`
+	Language                 string         `json:"language"`
+	CandidateSourceSHA256    string         `json:"candidate_source_sha256"`
+	CandidateSourceArtifact  *ArtifactRef   `json:"candidate_source_artifact"`
+	ProviderResponseArtifact *ArtifactRef   `json:"provider_response_artifact"`
+	SourceArtifacts          []*ArtifactRef `json:"source_artifacts,omitempty"`
 }
 
 // GenerateMainSolutionActivityV1 is the G-side-only program generator. It
@@ -370,6 +371,8 @@ func (a *Activities) GenerateMainSolutionActivityV1(ctx context.Context, in Gene
 	if in.PayloadVersion != S3QualityPayloadVersionV1 || !isManifestSHA256(in.ExpectedAuthoringBundleSHA) || !isManifestSHA256(in.ExpectedStatementDraftSHA) || !isManifestSHA256(in.ExpectedSemanticSpecSHA) || strings.TrimSpace(in.Language) == "" {
 		return nil, s3ContractErrorV1("invalid main-solution input")
 	}
+	stopHB := heartbeatWhile(ctx, "generating and storing the main solution", 15*time.Second)
+	defer stopHB()
 	bundleBytes, err := a.readS3ArtifactV1(ctx, in.AuthoringBundleArtifact, in.ExpectedAuthoringBundleSHA, "application/json", maxAuthoringPlanBundleBytes)
 	if err != nil {
 		return nil, err
@@ -396,7 +399,7 @@ func (a *Activities) GenerateMainSolutionActivityV1(ctx context.Context, in Gene
 		return nil, fmt.Errorf("marshal main-solution prompt: %w", err)
 	}
 	temperature := 0.0
-	req := &llm.Request{MaxTokens: 16000, System: s3MainSolutionSystemPromptV1, Temperature: &temperature, Messages: []llm.Message{{Role: "user", Content: string(prompt)}}}
+	req := &llm.Request{MaxTokens: 16000, System: s3MainSolutionSystemPromptV2, PromptID: s3MainSolutionPromptIDV2, PromptVersion: "v2", Temperature: &temperature, Messages: []llm.Message{{Role: "user", Content: string(prompt)}}}
 	if in.MainRuntime != nil {
 		copyRuntime := *in.MainRuntime
 		if err := copyRuntime.Validate("main_runtime"); err != nil {
@@ -404,16 +407,9 @@ func (a *Activities) GenerateMainSolutionActivityV1(ctx context.Context, in Gene
 		}
 		applyLLMRuntime(req, &copyRuntime)
 	}
-	response, providerArtifact, err := a.completeLLMWithProvenance(ctx, "s3_main_solution_v1", req, 2)
+	parsed, providerArtifact, sources, err := a.completeS3MainOutputV2(ctx, req, in.Language)
 	if err != nil {
-		return nil, wrapRequiredProviderEffectError("S3 main solution", err)
-	}
-	if response == nil || providerArtifact == nil || providerArtifact.LLMCallReceipt == nil || response.StopReason == "max_tokens" {
-		return nil, s3ContractErrorV1("main-solution provider response is missing identity or truncated")
-	}
-	parsed, err := parseOracleCandidateResponseV1(response.Text())
-	if err != nil || parsed.Language != in.Language {
-		return nil, s3ContractErrorV1("strict main-solution response: %v", err)
+		return nil, err
 	}
 	sourceBytes := []byte(parsed.SourceCode)
 	metadata := artifactMetadataFromActivity(ctx)
@@ -427,7 +423,7 @@ func (a *Activities) GenerateMainSolutionActivityV1(ctx context.Context, in Gene
 	if ref == nil || ref.SHA256 != sha256Hex(sourceBytes) || ref.Producer != "GenerateMainSolutionActivityV1" {
 		return nil, fmt.Errorf("main-solution CAS identity mismatch")
 	}
-	return &GenerateMainSolutionResultV1{PayloadVersion: S3QualityPayloadVersionV1, SchemaVersion: GenerateMainSolutionSchemaV1, AuthoringBundleSHA256: in.ExpectedAuthoringBundleSHA, StatementDraftSHA256: in.ExpectedStatementDraftSHA, SemanticSpecSHA256: in.ExpectedSemanticSpecSHA, Language: in.Language, CandidateSourceSHA256: ref.SHA256, CandidateSourceArtifact: ref, ProviderResponseArtifact: providerArtifact}, nil
+	return &GenerateMainSolutionResultV1{PayloadVersion: S3QualityPayloadVersionV1, SchemaVersion: GenerateMainSolutionSchemaV1, AuthoringBundleSHA256: in.ExpectedAuthoringBundleSHA, StatementDraftSHA256: in.ExpectedStatementDraftSHA, SemanticSpecSHA256: in.ExpectedSemanticSpecSHA, Language: in.Language, CandidateSourceSHA256: ref.SHA256, CandidateSourceArtifact: ref, ProviderResponseArtifact: providerArtifact, SourceArtifacts: sources}, nil
 }
 
 const s3MainSolutionSystemPromptV1 = `You are the G implementation stage for AlgoForge S3. Implement the accepted SemanticSpec, AuthoringPlan, and statement shell exactly in the requested language. Return exactly one compact JSON object {"source_code":"full source","language":"requested language"}. Do not emit Markdown, commentary, tests, oracle source, or hidden material.`
@@ -472,15 +468,15 @@ func (a *Activities) GenerateS3TestDataActivityV1(ctx context.Context, in Genera
 	if err := decodeCanonicalSampleClosureJSONV1(draftBytes, &draft); err != nil || validateStatementDraftForSampleClosureV1(draft, *bundle, in.ExpectedSemanticSpecSHA, in.ExpectedAuthoringBundleSHA, in.ExpectedStatementDraftSHA) != nil {
 		return nil, s3ContractErrorV1("S3 test generation statement shell has invalid ancestry")
 	}
-	params, err := enrichS3TestDataParamsV1(in.Params, *bundle.SemanticSpec, *bundle.AuthoringPlan)
+	params, coverageContract, err := enrichS3TestDataParamsV6(in.Params, *bundle.SemanticSpec, *bundle.AuthoringPlan)
 	if err != nil {
 		return nil, s3ContractErrorV1("build typed S3 test-data context: %v", err)
 	}
-	result, err := a.generateTestDataActivity(ctx, draft.Markdown, in.Config, params, true)
+	result, err := a.generateTestDataActivity(ctx, draft.Markdown, in.Config, params, true, coverageContract)
 	if err != nil {
 		return nil, err
 	}
-	if err := a.validateS3GeneratedTestDataCoverageV5(ctx, *bundle.SemanticSpec, *bundle.AuthoringPlan, *result); err != nil {
+	if err := a.validateS3GeneratedTestDataCoverageV6(ctx, *bundle.SemanticSpec, *bundle.AuthoringPlan, *result); err != nil {
 		return nil, err
 	}
 	return result, nil
@@ -597,6 +593,20 @@ func (a *Activities) MaterializeS3CasePlanActivityV1(ctx context.Context, in Mat
 	plan := S3CasePlanBundleV1{SchemaVersion: S3CasePlanSchemaV1, SemanticSpecSHA256: semanticSHA, AuthoringBundleSHA256: in.ExpectedAuthoringBundleSHA, TestDataIdentitySHA256: testIdentity, Cases: make([]S3ManifestCasePlanV1, len(in.TestData.TestCases)), SanitizerCaseIDs: []string{}}
 	plan.InputParserRuleVersion = speccontract.TestCaseInputParserRuleVersionForSpecV2(*bundle.SemanticSpec)
 	plan.ConstraintRegionRuleVersion = ConstraintRegionMatchingRuleVersionV3
+	var explicitRegionIDs [][]string
+	if in.TestData.S3Coverage != nil {
+		explicitRegionIDs, err = s3CoverageAssociationIDsV6(*bundle.SemanticSpec, *bundle.AuthoringPlan, in.TestData)
+		if err != nil {
+			return nil, s3ContractErrorV1("invalid explicit test-data associations: %v", err)
+		}
+		plan.ConstraintRegionRuleVersion = ConstraintRegionAssociationRuleVersionV4
+	} else {
+		for _, item := range in.TestData.TestCases {
+			if len(item.RegionObligationIndexes) != 0 {
+				return nil, s3ContractErrorV1("legacy test data cannot claim explicit region indexes")
+			}
+		}
+	}
 	sanitizerIdentities := make([]struct {
 		TestID      string `json:"test_id"`
 		InputSHA256 string `json:"input_sha256"`
@@ -669,6 +679,9 @@ func (a *Activities) MaterializeS3CasePlanActivityV1(ctx context.Context, in Mat
 		}
 		region := "unassigned"
 		for _, intent := range bundle.AuthoringPlan.TestIntents {
+			if explicitRegionIDs != nil {
+				break // New cases retain explicit associations; refs do not prove natural regions.
+			}
 			matched := true
 			for _, ref := range intent.BoundaryRefs {
 				matched = matched && boundaryHit[ref]
@@ -695,6 +708,9 @@ func (a *Activities) MaterializeS3CasePlanActivityV1(ctx context.Context, in Mat
 			seed = int64(binary.BigEndian.Uint64(digest[:8]) & uint64(^uint64(0)>>1))
 		}
 		plan.Cases[index] = S3ManifestCasePlanV1{TestID: testID, Purpose: purpose, ConstraintRegion: region, BoundaryRefs: boundaryRefs, Seed: seed, InputArtifact: inputRef, OriginalInputArtifact: originalInputRef, InputNormalizationRuleVersion: normalizationRule, KilledWrongIDs: []string{}, KilledWrongIDsRetentionReason: "not measured by S3 source-of-truth case materializer v1"}
+		if explicitRegionIDs != nil {
+			plan.Cases[index].RegionObligationIDs = explicitRegionIDs[index]
+		}
 		if len(raw) <= maxS3SanitizerCaseBytesV1 && len(sanitizerIdentities) < maxS3SanitizerCasesV1 && sanitizerBytes+len(raw) <= maxS3SanitizerSuiteBytesV1 {
 			plan.SanitizerCaseIDs = append(plan.SanitizerCaseIDs, testID)
 			sanitizerIdentities = append(sanitizerIdentities, struct {
@@ -702,6 +718,19 @@ func (a *Activities) MaterializeS3CasePlanActivityV1(ctx context.Context, in Mat
 				InputSHA256 string `json:"input_sha256"`
 			}{testID, inputRef.SHA256})
 			sanitizerBytes += len(raw)
+		}
+	}
+	if explicitRegionIDs != nil {
+		derived, deriveErr := DeriveInputBoundaryCasePlanV3(*bundle.SemanticSpec, *bundle.AuthoringPlan)
+		if deriveErr != nil {
+			return nil, s3ContractErrorV1("derive explicit case associations: %v", deriveErr)
+		}
+		cases := make([]ConstraintRegionCaseAssociationV4, len(plan.Cases))
+		for i, c := range plan.Cases {
+			cases[i] = ConstraintRegionCaseAssociationV4{ConstraintRegionCaseWitnessV2: ConstraintRegionCaseWitnessV2{TestID: c.TestID, InputSHA256: c.InputArtifact.SHA256, BoundaryRefs: c.BoundaryRefs}, RegionObligationIDs: c.RegionObligationIDs}
+		}
+		if _, err := DeriveConstraintRegionAssociationsV4(*derived, cases); err != nil {
+			return nil, s3QualityErrorV1("validate explicit case associations: %v", err)
 		}
 	}
 	if len(plan.SanitizerCaseIDs) == 0 {
@@ -1204,6 +1233,7 @@ type S3ManifestCasePlanV1 struct {
 	InputNormalizationRuleVersion string       `json:"input_normalization_rule_version,omitempty"`
 	KilledWrongIDs                []string     `json:"killed_wrong_ids"`
 	KilledWrongIDsRetentionReason string       `json:"killed_wrong_ids_retention_reason"`
+	RegionObligationIDs           []string     `json:"region_obligation_ids,omitempty"`
 }
 
 type S3ManifestGateInputV1 struct {
@@ -1363,6 +1393,7 @@ func (a *Activities) BuildS3TestManifestActivityV1(ctx context.Context, in S3Man
 		seed := planCase.Seed
 		inputRef := planCase.InputArtifact
 		manifest.Cases[index] = TestManifestCaseV2{TestIndex: index, TestID: planCase.TestID, Purpose: planCase.Purpose, ConstraintRegion: planCase.ConstraintRegion, BoundaryRefs: copyPresentS3StringsV1(planCase.BoundaryRefs), Seed: &seed, InputArtifact: &inputRef, InputSHA256: inputRef.SHA256, OutputArtifact: outputRef, OutputSHA256: outputRef.SHA256, KilledWrongIDs: copyPresentS3StringsV1(planCase.KilledWrongIDs), KilledWrongIDsRetentionReason: planCase.KilledWrongIDsRetentionReason}
+		manifest.Cases[index].RegionObligationIDs = append([]string(nil), planCase.RegionObligationIDs...)
 		resolved[index] = IntegerBoundaryCoverageCaseInputV1{TestID: planCase.TestID, Input: string(inputBytes)}
 	}
 	validateCoverage := ValidateIntegerBoundaryCoverageV1
@@ -1547,6 +1578,7 @@ type S3StrictReviewerInputV1 struct {
 	VisibleAssets        []S3ReviewerAssetV1      `json:"visible_assets"`
 	ReviewRuntime        *domain.LLMRuntimeConfig `json:"review_runtime,omitempty"`
 	TargetDifficulty     int                      `json:"target_difficulty,omitempty"`
+	RequestedTags        []string                 `json:"requested_tags"`
 }
 
 type S3StrictReviewerResultV1 struct {
@@ -1558,15 +1590,15 @@ type S3StrictReviewerResultV1 struct {
 }
 
 const (
-	s3ReviewerPromptIDV3             = "s3_strict_reviewer_v3"
-	s3ReviewerFormatRepairPromptIDV3 = "s3_strict_reviewer_v3_format_repair_1"
-	s3ReviewerPromptVersionV3        = "v3"
+	s3ReviewerPromptIDV4             = "s3_strict_reviewer_v4"
+	s3ReviewerFormatRepairPromptIDV4 = "s3_strict_reviewer_v4_format_repair_1"
+	s3ReviewerPromptVersionV4        = "v4"
 	s3ReviewerMaxTokensV3            = 8192
 	s3ReviewerReasoningMaxTokensV3   = 32768
 	s3ReviewerExpandedMaxTokensV3    = 65536
-	s3ReviewerBudgetRetryPromptIDV3  = "s3_strict_reviewer_v3_reasoning_budget_retry_1"
-	s3ReviewerBudgetFormatPromptIDV3 = "s3_strict_reviewer_v3_reasoning_budget_retry_1_format_repair_1"
-	s3ReviewerFormatBudgetPromptIDV3 = "s3_strict_reviewer_v3_format_repair_1_reasoning_budget_retry_1"
+	s3ReviewerBudgetRetryPromptIDV4  = "s3_strict_reviewer_v4_reasoning_budget_retry_1"
+	s3ReviewerBudgetFormatPromptIDV4 = "s3_strict_reviewer_v4_reasoning_budget_retry_1_format_repair_1"
+	s3ReviewerFormatBudgetPromptIDV4 = "s3_strict_reviewer_v4_format_repair_1_reasoning_budget_retry_1"
 )
 
 func s3ReviewerOutputBudgetV3(runtime *llm.RuntimeConfig) int {
@@ -1587,6 +1619,9 @@ func (a *Activities) S3StrictReviewerActivityV1(ctx context.Context, in S3Strict
 	if in.PayloadVersion != S3QualityPayloadVersionV1 || strings.TrimSpace(in.SubjectID) == "" || !isManifestSHA256(in.SubjectRevision) {
 		return nil, s3ContractErrorV1("invalid strict reviewer identity")
 	}
+	activity.RecordHeartbeat(ctx, "reviewing complete S3 manifest and visible assets")
+	stopHeartbeat := heartbeatWhile(ctx, "reviewing complete S3 manifest and visible assets", 15*time.Second)
+	defer stopHeartbeat()
 	if in.TargetDifficulty != 0 {
 		if err := domain.ValidateTrainingDifficulty(in.TargetDifficulty); err != nil {
 			return nil, s3ContractErrorV1("invalid reviewer training target: %v", err)
@@ -1600,58 +1635,16 @@ func (a *Activities) S3StrictReviewerActivityV1(ctx context.Context, in S3Strict
 	if err != nil || manifest.TestCount != len(manifest.Cases) {
 		return nil, s3ContractErrorV1("strict reviewer requires the complete canonical TestManifest v2")
 	}
-	assets := append([]S3ReviewerAssetV1(nil), in.VisibleAssets...)
-	sort.Slice(assets, func(i, j int) bool { return assets[i].Role < assets[j].Role })
-	seen := map[string]bool{}
-	visible := make([]struct {
-		Role          string `json:"role"`
-		ArtifactRef   string `json:"artifact_ref"`
-		SHA256        string `json:"sha256"`
-		ContentBase64 string `json:"content_base64"`
-	}, 0, len(assets))
-	total := len(manifestBytes)
-	for _, asset := range assets {
-		if !validS3ReviewerRoleV1(asset.Role) || seen[asset.Role] || asset.ExpectedSHA256 != asset.Artifact.SHA256 {
-			return nil, s3ContractErrorV1("reviewer asset role or identity is invalid")
-		}
-		seen[asset.Role] = true
-		data, readErr := a.readS3ArtifactV1(ctx, asset.Artifact, asset.ExpectedSHA256, asset.Artifact.ContentType, maxS3ReviewVisibleBytesV1)
-		if readErr != nil {
-			return nil, readErr
-		}
-		total += len(data)
-		if total > maxS3ReviewVisibleBytesV1 {
-			return nil, s3ContractErrorV1("reviewer visible assets exceed %d bytes", maxS3ReviewVisibleBytesV1)
-		}
-		visible = append(visible, struct {
-			Role          string `json:"role"`
-			ArtifactRef   string `json:"artifact_ref"`
-			SHA256        string `json:"sha256"`
-			ContentBase64 string `json:"content_base64"`
-		}{asset.Role, s3ArtifactRefURI(&asset.Artifact), asset.ExpectedSHA256, base64.StdEncoding.EncodeToString(data)})
-	}
-	for _, required := range []string{"semantic_spec", "final_statement", "oracle_promotion", "sanitizer", "boundary_coverage"} {
-		if !seen[required] {
-			return nil, s3ContractErrorV1("reviewer visible asset %q is required", required)
-		}
-	}
-	promptPayload := struct {
-		SubjectID        string          `json:"subject_id"`
-		SubjectRevision  string          `json:"subject_revision"`
-		TestManifest     json.RawMessage `json:"test_manifest"`
-		VisibleAssets    interface{}     `json:"visible_assets"`
-		TargetDifficulty int             `json:"target_difficulty,omitempty"`
-	}{in.SubjectID, in.SubjectRevision, json.RawMessage(manifestBytes), visible, in.TargetDifficulty}
-	prompt, err := json.Marshal(promptPayload)
+	prompt, err := a.buildS3ReviewerFactsV4(ctx, in, *manifest, manifestBytes)
 	if err != nil {
-		return nil, fmt.Errorf("marshal strict reviewer prompt: %w", err)
+		return nil, err
 	}
 	temperature := 0.0
 	system, err := s3ReviewerOutputPromptV2(in.TargetDifficulty > 0)
 	if err != nil {
 		return nil, fmt.Errorf("build strict reviewer output contract: %w", err)
 	}
-	req := &llm.Request{System: system, PromptVersion: s3ReviewerPromptVersionV3, Temperature: &temperature, Messages: []llm.Message{{Role: "user", Content: string(prompt)}}}
+	req := &llm.Request{System: system + s3ReviewerFactsInstructionsV4, PromptVersion: s3ReviewerPromptVersionV4, Temperature: &temperature, Messages: []llm.Message{{Role: "user", Content: string(prompt)}}}
 	if in.TargetDifficulty > 0 {
 		req.System += s3TrainingReviewerGuidanceV1
 	}
@@ -1663,9 +1656,6 @@ func (a *Activities) S3StrictReviewerActivityV1(ctx context.Context, in S3Strict
 		applyLLMRuntime(req, &copyRuntime)
 	}
 	req.MaxTokens = s3ReviewerOutputBudgetV3(req.Runtime)
-	activity.RecordHeartbeat(ctx, "reviewing complete S3 manifest and visible assets")
-	stopHeartbeat := heartbeatWhile(ctx, "reviewing complete S3 manifest and visible assets", 15*time.Second)
-	defer stopHeartbeat()
 	assessment, providerArtifact, sources, err := a.completeS3ReviewerFormatV2(ctx, req, in.TargetDifficulty > 0)
 	if err != nil {
 		return nil, err
@@ -1708,11 +1698,11 @@ func (a *Activities) completeS3ReviewerFormatV2(ctx context.Context, request *ll
 	budgetExpanded := false
 	canExpandBudget := req.MaxTokens == s3ReviewerReasoningMaxTokensV3 && s3ReviewerOutputBudgetV3(req.Runtime) == s3ReviewerReasoningMaxTokensV3
 	for attempt := 0; attempt < 2; attempt++ {
-		key := s3ReviewerPromptIDV3
+		key := s3ReviewerPromptIDV4
 		if attempt == 1 {
-			key = s3ReviewerFormatRepairPromptIDV3
+			key = s3ReviewerFormatRepairPromptIDV4
 			if budgetExpanded {
-				key = s3ReviewerBudgetFormatPromptIDV3
+				key = s3ReviewerBudgetFormatPromptIDV4
 			}
 		}
 		var response *llm.Response
@@ -1737,14 +1727,14 @@ func (a *Activities) completeS3ReviewerFormatV2(ctx context.Context, request *ll
 				return qualitygate.ReviewAssessmentV1{}, source, sources, temporal.NewNonRetryableApplicationError("strict reviewer response was truncated at token limit", "ReviewerTruncatedError", nil)
 			}
 			// A larger reasoning budget is a separate, once-only paid effect.
-			// Keep the original v3 request and cached response unchanged, so a
+			// Keep the original request and cached response unchanged, so a
 			// completed assessment never pays for a new review on redelivery.
 			budgetExpanded = true
 			budgetOriginal = strings.TrimSpace(response.Text())
 			req.MaxTokens = s3ReviewerExpandedMaxTokensV3
-			key = s3ReviewerBudgetRetryPromptIDV3
+			key = s3ReviewerBudgetRetryPromptIDV4
 			if attempt == 1 {
-				key = s3ReviewerFormatBudgetPromptIDV3
+				key = s3ReviewerFormatBudgetPromptIDV4
 			}
 		}
 		text := strings.TrimSpace(response.Text())
@@ -2241,11 +2231,14 @@ func (a *Activities) loadS3CasePlanV1(ctx context.Context, ref ArtifactRef) (*S3
 	if err := decodeCanonicalSampleClosureJSONV1(data, &plan); err != nil || plan.SchemaVersion != S3CasePlanSchemaV1 || !isManifestSHA256(plan.SemanticSpecSHA256) || !isManifestSHA256(plan.AuthoringBundleSHA256) || !isManifestSHA256(plan.TestDataIdentitySHA256) || !isManifestSHA256(plan.SanitizerSuiteSHA256) || len(plan.Cases) == 0 || len(plan.SanitizerCaseIDs) == 0 || len(plan.SanitizerCaseIDs) > maxS3SanitizerCasesV1 {
 		return nil, nil, s3ContractErrorV1("S3 case plan is not canonical or complete")
 	}
-	if plan.ConstraintRegionRuleVersion != "" && ((plan.ConstraintRegionRuleVersion != ConstraintRegionMatchingRuleVersionV2 && plan.ConstraintRegionRuleVersion != ConstraintRegionMatchingRuleVersionV3) || (plan.InputParserRuleVersion != speccontract.TestCaseInputParserRuleVersionV2 && plan.InputParserRuleVersion != speccontract.TestCaseInputParserTokenStringsRuleVersionV2)) {
+	if plan.ConstraintRegionRuleVersion != "" && ((plan.ConstraintRegionRuleVersion != ConstraintRegionMatchingRuleVersionV2 && plan.ConstraintRegionRuleVersion != ConstraintRegionMatchingRuleVersionV3 && plan.ConstraintRegionRuleVersion != ConstraintRegionAssociationRuleVersionV4) || (plan.InputParserRuleVersion != speccontract.TestCaseInputParserRuleVersionV2 && plan.InputParserRuleVersion != speccontract.TestCaseInputParserTokenStringsRuleVersionV2)) {
 		return nil, nil, s3ContractErrorV1("S3 case plan has an invalid constraint-region rule or input parser phase")
 	}
 	caseByID := make(map[string]S3ManifestCasePlanV1, len(plan.Cases))
 	for index, item := range plan.Cases {
+		if !sortedUniqueCanonicalStringsV2(item.RegionObligationIDs) || (plan.ConstraintRegionRuleVersion != ConstraintRegionAssociationRuleVersionV4 && len(item.RegionObligationIDs) != 0) {
+			return nil, nil, s3ContractErrorV1("S3 case plan has invalid explicit region associations")
+		}
 		if item.TestID == "" || item.TestID != strings.TrimSpace(item.TestID) || (index > 0 && plan.Cases[index-1].TestID >= item.TestID) || !validTestManifestPurposeV2(item.Purpose) || item.ConstraintRegion == "" || item.ConstraintRegion != strings.TrimSpace(item.ConstraintRegion) || item.BoundaryRefs == nil || !sortedUniqueCanonicalStringsV2(item.BoundaryRefs) || item.KilledWrongIDs == nil || !sortedUniqueCanonicalStringsV2(item.KilledWrongIDs) || strings.TrimSpace(item.KilledWrongIDsRetentionReason) == "" || item.InputArtifact.SHA256 == "" {
 			return nil, nil, s3ContractErrorV1("S3 case plan contains invalid derived metadata")
 		}
@@ -2410,7 +2403,7 @@ func sortedUniqueNonEmptyAllowEmptyS3V1(values []string) bool {
 
 func validS3ReviewerRoleV1(role string) bool {
 	switch role {
-	case "semantic_spec", "final_statement", "oracle_promotion", "sanitizer", "boundary_coverage":
+	case "semantic_spec", "final_statement", "oracle_promotion", "sanitizer", "boundary_coverage", "main_solution", "oracle_solution":
 		return true
 	default:
 		return false

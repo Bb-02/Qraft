@@ -46,6 +46,7 @@ type ProblemGenerationQualityResultV1 struct {
 	AuthoringBundleArtifact *activities.ArtifactRef                `json:"authoring_bundle_artifact,omitempty"`
 	StatementDraftArtifact  *activities.ArtifactRef                `json:"statement_draft_artifact,omitempty"`
 	MainProgramArtifact     *activities.ArtifactRef                `json:"main_program_artifact,omitempty"`
+	MainSourceArtifacts     []*activities.ArtifactRef              `json:"main_source_artifacts,omitempty"`
 	OracleProgramArtifact   *activities.ArtifactRef                `json:"oracle_program_artifact,omitempty"`
 	OracleReceiptArtifact   *activities.ArtifactRef                `json:"oracle_receipt_artifact,omitempty"`
 	TestManifestArtifact    *activities.ArtifactRef                `json:"test_manifest_artifact,omitempty"`
@@ -467,6 +468,10 @@ func runProblemQualityRevisionV1(ctx, activityCtx workflow.Context, root Problem
 	}
 	mainRef := *main.CandidateSourceArtifact
 	candidate.MainProgramArtifact = &mainRef
+	candidate.MainSourceArtifacts = append([]*activities.ArtifactRef(nil), main.SourceArtifacts...)
+	if len(candidate.MainSourceArtifacts) == 0 && main.ProviderResponseArtifact != nil {
+		candidate.MainSourceArtifacts = []*activities.ArtifactRef{main.ProviderResponseArtifact}
+	}
 	var oracle activities.GenerateOracleCandidateResultV1
 	if err := oracleFuture.Get(ctx, &oracle); err != nil {
 		return nil, fmt.Errorf("generate independent S3 oracle: %w", err)
@@ -609,12 +614,13 @@ func runProblemQualityRevisionV1(ctx, activityCtx workflow.Context, root Problem
 	}
 
 	visible := []activities.S3ReviewerAssetV1{{Role: "semantic_spec", Artifact: semanticRef, ExpectedSHA256: semanticRef.SHA256}, {Role: "final_statement", Artifact: finalRef, ExpectedSHA256: finalRef.SHA256}, {Role: "oracle_promotion", Artifact: oracleReceiptRef, ExpectedSHA256: oracleReceiptRef.SHA256}, {Role: "sanitizer", Artifact: *sanitizer.ReceiptArtifact, ExpectedSHA256: sanitizer.ReceiptSHA256}, {Role: "boundary_coverage", Artifact: boundaryRef, ExpectedSHA256: boundaryRef.SHA256}}
+	visible = append(visible, activities.S3ReviewerAssetV1{Role: "main_solution", Artifact: mainRef, ExpectedSHA256: mainRef.SHA256}, activities.S3ReviewerAssetV1{Role: "oracle_solution", Artifact: oracleRef, ExpectedSHA256: oracleRef.SHA256})
 	var reviewer activities.S3StrictReviewerResultV1
 	if state != nil {
 		state.CurrentStep = domain.StepLLMReview
 		state.Progress = 80
 	}
-	if err := workflow.ExecuteActivity(activityCtx, "S3StrictReviewerActivityV1", activities.S3StrictReviewerInputV1{PayloadVersion: activities.S3QualityPayloadVersionV1, SubjectID: root.SubjectID, SubjectRevision: finalStatement.FinalBundleSHA256, TestManifestArtifact: manifestRef, VisibleAssets: visible, ReviewRuntime: copyProblemQualityRuntimeV1(authoringInput.Params.ProviderConfig, "review"), TargetDifficulty: targetDifficulty}).Get(ctx, &reviewer); err != nil {
+	if err := workflow.ExecuteActivity(activityCtx, "S3StrictReviewerActivityV1", activities.S3StrictReviewerInputV1{PayloadVersion: activities.S3QualityPayloadVersionV1, SubjectID: root.SubjectID, SubjectRevision: finalStatement.FinalBundleSHA256, TestManifestArtifact: manifestRef, VisibleAssets: visible, ReviewRuntime: copyProblemQualityRuntimeV1(authoringInput.Params.ProviderConfig, "review"), TargetDifficulty: targetDifficulty, RequestedTags: append([]string{}, authoringInput.Params.Tags...)}).Get(ctx, &reviewer); err != nil {
 		return nil, fmt.Errorf("run strict S3 reviewer: %w", err)
 	}
 	if candidate.DifficultyAssessment != nil {
@@ -646,6 +652,7 @@ func runProblemQualityRevisionV1(ctx, activityCtx workflow.Context, root Problem
 		ReviewerInvoked: true, HiddenInvoked: hidden.Gate.Status != qualitygate.GateStatusNotConfigured,
 		AuthoringBundleArtifact: &bundleRef, StatementDraftArtifact: &draftRef,
 		FinalStatementArtifact: &finalRef, MainProgramArtifact: &mainRef,
+		MainSourceArtifacts:   candidate.MainSourceArtifacts,
 		OracleProgramArtifact: &oracleRef, OracleReceiptArtifact: &oracleReceiptRef,
 		TestManifestArtifact: &manifestRef, Audit: &verdict.Audit, AuditArtifact: verdict.AuditArtifact,
 		DifficultyAssessment: candidate.DifficultyAssessment,

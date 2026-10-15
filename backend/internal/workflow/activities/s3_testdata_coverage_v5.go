@@ -54,7 +54,7 @@ func (a *Activities) validateS3GeneratedTestDataCoverageV5(ctx context.Context, 
 	return temporal.NewNonRetryableApplicationError("S3 test-data coverage preflight failed: "+strings.Join(missing, "; "), "S3TestDataCoverageError", nil, result.SourceArtifacts)
 }
 
-func missingS3GeneratedCoverageObligationsV5(spec domain.SemanticSpecV1, plan domain.AuthoringPlanV1, inputs []string) ([]string, error) {
+func missingS3GeneratedCoverageObligationsV5(spec domain.SemanticSpecV1, plan domain.AuthoringPlanV1, inputs []string, explicitAssociations ...[][]string) ([]string, error) {
 	derived, err := DeriveInputBoundaryCasePlanV3(spec, plan)
 	if err != nil {
 		return nil, s3QualityErrorV1("derive S3 coverage preflight obligations: %v", err)
@@ -99,7 +99,20 @@ func missingS3GeneratedCoverageObligationsV5(spec domain.SemanticSpecV1, plan do
 		}
 		missing = append(missing, fmt.Sprintf("missing obligation %q (kind=%s, subject=%q, dimension=%q, value=%d, boundary_refs=%q)", obligation.ID, obligation.Kind, obligation.Subject, obligation.Dimension, *obligation.Value, obligation.BoundaryRefs))
 	}
-	if _, err := DeriveConstraintRegionWitnessesV2(*derived, witnessCases); err != nil {
+	var regionErr error
+	if len(explicitAssociations) == 1 {
+		if len(explicitAssociations[0]) != len(witnessCases) {
+			return nil, s3ContractErrorV1("explicit region association count differs from actual input count")
+		}
+		cases := make([]ConstraintRegionCaseAssociationV4, len(witnessCases))
+		for i, item := range witnessCases {
+			cases[i] = ConstraintRegionCaseAssociationV4{ConstraintRegionCaseWitnessV2: item, RegionObligationIDs: explicitAssociations[0][i]}
+		}
+		_, regionErr = DeriveConstraintRegionAssociationsV4(*derived, cases)
+	} else {
+		_, regionErr = DeriveConstraintRegionWitnessesV2(*derived, witnessCases)
+	}
+	if err := regionErr; err != nil {
 		missing = append(missing, err.Error())
 	}
 	return missing, nil

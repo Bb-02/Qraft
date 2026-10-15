@@ -3,7 +3,6 @@ package workflow
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -18,6 +17,7 @@ import (
 	qualitygate "github.com/Gingoo-TvT/Qraft/backend/internal/qualitygate/v1"
 	"github.com/Gingoo-TvT/Qraft/backend/internal/repository"
 	remotesandbox "github.com/Gingoo-TvT/Qraft/backend/internal/sandbox"
+	speccontract "github.com/Gingoo-TvT/Qraft/backend/internal/spec"
 	"github.com/Gingoo-TvT/Qraft/backend/internal/workflow/activities"
 	"github.com/google/uuid"
 	"go.temporal.io/sdk/activity"
@@ -304,12 +304,28 @@ func (f *fixed20LLM) assertReviewerPromptContainsFullManifest(t *testing.T, want
 		t.Fatalf("reviewer provider calls=%d, want 1", len(f.reviewerPrompts))
 	}
 	var prompt struct {
-		TestManifest  activities.TestManifestV2 `json:"test_manifest"`
+		TestManifest          activities.TestManifestV2 `json:"test_manifest"`
+		RequestedTags         []string                  `json:"requested_tags"`
+		RequestedTagsProvided bool                      `json:"requested_tags_provided"`
+		ProgramSourcesStatus  string                    `json:"program_sources_status"`
+		Cases                 []struct {
+			TestID string `json:"test_id"`
+			Input  struct {
+				Content   *string `json:"content"`
+				Truncated bool    `json:"truncated"`
+				SHA256    string  `json:"sha256"`
+			} `json:"input"`
+			Output struct {
+				Content   *string `json:"content"`
+				Truncated bool    `json:"truncated"`
+				SHA256    string  `json:"sha256"`
+			} `json:"output"`
+		} `json:"cases"`
 		VisibleAssets []struct {
-			Role          string `json:"role"`
-			ArtifactRef   string `json:"artifact_ref"`
-			SHA256        string `json:"sha256"`
-			ContentBase64 string `json:"content_base64"`
+			Role        string `json:"role"`
+			ArtifactRef string `json:"artifact_ref"`
+			SHA256      string `json:"sha256"`
+			Content     string `json:"content"`
 		} `json:"visible_assets"`
 	}
 	if err := json.Unmarshal([]byte(f.reviewerPrompts[0]), &prompt); err != nil {
@@ -317,6 +333,23 @@ func (f *fixed20LLM) assertReviewerPromptContainsFullManifest(t *testing.T, want
 	}
 	if want.TestCount != 3 || len(want.Cases) != 3 {
 		t.Fatalf("fixture manifest cases=%d/%d, want 3", want.TestCount, len(want.Cases))
+	}
+	if !prompt.RequestedTagsProvided || len(prompt.RequestedTags) == 0 || prompt.ProgramSourcesStatus != "verified" || len(prompt.Cases) != len(want.Cases) {
+		t.Fatalf("reviewer omitted requested tags, verified sources or actual cases")
+	}
+	for i, item := range prompt.Cases {
+		if item.TestID != want.Cases[i].TestID || item.Input.Content == nil || item.Output.Content == nil || item.Input.Truncated || item.Output.Truncated {
+			t.Fatalf("reviewer small case %d is not completely visible", i)
+		}
+		for _, view := range []struct {
+			content string
+			sha     string
+		}{{*item.Input.Content, item.Input.SHA256}, {*item.Output.Content, item.Output.SHA256}} {
+			digest := sha256.Sum256([]byte(view.content))
+			if hex.EncodeToString(digest[:]) != view.sha {
+				t.Fatalf("reviewer case %d content is not SHA-bound", i)
+			}
+		}
 	}
 	if prompt.TestManifest.SchemaVersion != want.SchemaVersion || prompt.TestManifest.TestCount != want.TestCount || len(prompt.TestManifest.Cases) != len(want.Cases) {
 		t.Fatalf("reviewer manifest summary=%+v, want=%+v", prompt.TestManifest, want)
@@ -333,6 +366,8 @@ func (f *fixed20LLM) assertReviewerPromptContainsFullManifest(t *testing.T, want
 		"oracle_promotion":  false,
 		"sanitizer":         false,
 		"boundary_coverage": false,
+		"main_solution":     false,
+		"oracle_solution":   false,
 	}
 	if len(prompt.VisibleAssets) != len(required) {
 		t.Fatalf("reviewer visible assets=%d, want=%d", len(prompt.VisibleAssets), len(required))
@@ -342,9 +377,9 @@ func (f *fixed20LLM) assertReviewerPromptContainsFullManifest(t *testing.T, want
 		if !ok || seen {
 			t.Fatalf("reviewer visible asset role=%q is unknown or duplicated", asset.Role)
 		}
-		content, err := base64.StdEncoding.DecodeString(asset.ContentBase64)
-		if err != nil || len(content) == 0 {
-			t.Fatalf("reviewer visible asset %q content is missing or invalid: %v", asset.Role, err)
+		content := []byte(asset.Content)
+		if len(content) == 0 {
+			t.Fatalf("reviewer visible asset %q content is missing", asset.Role)
 		}
 		digest := sha256.Sum256(content)
 		if hex.EncodeToString(digest[:]) != asset.SHA256 || !strings.HasPrefix(asset.ArtifactRef, "cas://"+fixed20Bucket+"/") || !strings.HasSuffix(asset.ArtifactRef, "/"+asset.SHA256) {
@@ -576,11 +611,42 @@ func fixed20ProgramResponse(marker string, index int) (string, error) {
 
 func fixed20TestDataResponse(index int) (string, error) {
 	inputs := fixed20Inputs(index)
+	authoring, err := fixed20AuthoringResponse(index)
+	if err != nil {
+		return "", err
+	}
+	var frozen struct {
+		Spec domain.SemanticSpecV1  `json:"semantic_spec"`
+		Plan domain.AuthoringPlanV1 `json:"authoring_plan"`
+	}
+	if err := json.Unmarshal([]byte("{"+authoring), &frozen); err != nil {
+		return "", err
+	}
+	frozen.Spec.SchemaVersion, frozen.Plan.SchemaVersion = domain.SemanticSpecSchemaV1, domain.AuthoringPlanSchemaV1
+	frozen.Plan.SemanticSpecSHA256 = speccontract.SemanticSpecSHA256V1(frozen.Spec)
+	derived, err := activities.DeriveInputBoundaryCasePlanV3(frozen.Spec, frozen.Plan)
+	if err != nil {
+		return "", err
+	}
+	indexes := make(map[string]int)
+	for i, obligation := range derived.Obligations {
+		if obligation.Kind == activities.IntegerBoundaryObligationRegion {
+			indexes[obligation.ConstraintRegion] = i
+		}
+	}
+	regionIndexes := make([][]int, 3)
+	for i, suffix := range []string{"min", "zero", "max"} {
+		position, exists := indexes[fmt.Sprintf("fixed-%02d-%s", index, suffix)]
+		if !exists {
+			return "", fmt.Errorf("synthetic region %s is absent", suffix)
+		}
+		regionIndexes[i] = []int{position}
+	}
 	value := map[string]interface{}{
 		"test_cases": []map[string]interface{}{
-			{"input": inputs[0], "group_id": 0, "is_sample": true, "description": "minimum boundary"},
-			{"input": inputs[1], "group_id": 0, "is_sample": false, "description": "zero element"},
-			{"input": inputs[2], "group_id": 0, "is_sample": false, "description": "maximum boundary"},
+			{"input": inputs[0], "group_id": 0, "is_sample": true, "description": "minimum boundary", "region_obligation_indexes": regionIndexes[0]},
+			{"input": inputs[1], "group_id": 0, "is_sample": false, "description": "zero element", "region_obligation_indexes": regionIndexes[1]},
+			{"input": inputs[2], "group_id": 0, "is_sample": false, "description": "maximum boundary", "region_obligation_indexes": regionIndexes[2]},
 		},
 		"generator_code": "",
 	}
@@ -802,6 +868,17 @@ func TestProblemGenerationQualityWorkflowV1Fixed20UsesSourceActivities(t *testin
 			}
 			if result.Decision != qualitygate.DecisionPass || result.StoppedGate != "" || !result.ReviewerInvoked || !result.HiddenInvoked || result.Audit == nil || result.AuditArtifact == nil || result.TestManifestArtifact == nil || result.MainProgramArtifact == nil {
 				t.Fatalf("unexpected fixed20 terminal result: %+v", result)
+			}
+			if len(result.MainSourceArtifacts) == 0 {
+				t.Fatal("workflow lost main provider source artifacts")
+			}
+			for _, source := range result.MainSourceArtifacts {
+				if source == nil || source.LLMCallReceipt == nil {
+					t.Fatal("main provider source lacks its provenance")
+				}
+				if _, err := h.store.Get(context.Background(), *source); err != nil {
+					t.Fatalf("main provider source was not retained: %v", err)
+				}
 			}
 			if got, want := len(result.Audit.GateResults), 9; got != want {
 				t.Fatalf("gate results=%d want=%d: %+v", got, want, result.Audit.GateResults)

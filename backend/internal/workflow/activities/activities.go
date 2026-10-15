@@ -408,6 +408,7 @@ type TestCaseData struct {
 	GeneratorSeed             int64          `json:"generator_seed,omitempty"`
 	GeneratorCaseIndex        *int           `json:"generator_case_index,omitempty"`
 	GeneratorBatchIndex       *int           `json:"generator_batch_index,omitempty"`
+	RegionObligationIndexes   []int          `json:"region_obligation_indexes,omitempty"`
 }
 
 type GeneratorBatchAudit struct {
@@ -430,6 +431,7 @@ type TestDataResult struct {
 	GeneratorCode         string                `json:"generator_code,omitempty"`
 	GeneratorSHA256       string                `json:"generator_sha256,omitempty"`
 	GeneratorBatches      []GeneratorBatchAudit `json:"generator_batches,omitempty"`
+	S3Coverage            *S3TestDataCoverageV6 `json:"s3_coverage,omitempty"`
 }
 
 // ExecutionLimits specifies resource constraints for sandbox execution.

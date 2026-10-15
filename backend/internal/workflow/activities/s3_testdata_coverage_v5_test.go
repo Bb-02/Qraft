@@ -142,6 +142,9 @@ func TestGenerateS3TestDataV5BoundAdapterChecksExecutedGeneratorInputs(t *testin
 			fixture := tokenStringAuthoringFixtureV2(t, samples)
 			draftRef := seedSampleClosureStatementDraft(t, fixture)
 			output := `{"test_case_count":4,"test_cases":[{"input":"0\n\n"},{"input":""},{"input":""},{"input":""}],"generator_code":"int main(){}"}`
+			output = addS3RegionIndexesFixtureV6(t, output, *fixture.bundle.SemanticSpec, *fixture.bundle.AuthoringPlan, func(i int, ob IntegerBoundaryCaseObligationV1) bool {
+				return ob.ConstraintRegion == fmt.Sprintf("n=%d", i)
+			})
 			model := &authoringFormatLLM{responses: []*llm.Response{authoringLLMResponse(output)}}
 			acts := presentationActivitiesV2(model, fixture.statementDraftFixture)
 			generatorCalls := 0
@@ -177,7 +180,7 @@ func TestGenerateS3TestDataV5BoundAdapterChecksExecutedGeneratorInputs(t *testin
 			})
 			require.Equal(t, 3, generatorCalls, "only actual test generators run; no program verification or model coverage repair")
 			require.Len(t, model.requests, 1)
-			require.Equal(t, s3TestDataPromptIDV5, model.requests[0].PromptID)
+			require.Equal(t, s3TestDataPromptIDV6, model.requests[0].PromptID)
 			if !complete {
 				var failure *temporal.ApplicationError
 				require.ErrorAs(t, err, &failure)
