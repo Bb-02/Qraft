@@ -32,6 +32,10 @@ func DescribeFailure(err error) *domain.GenerationFailure {
 		formatted.TechnicalDetails = failure.TechnicalDetails
 		return formatted
 	}
+	if internal := internalDataContractFailure(err.Error()); internal != nil {
+		internal.TechnicalDetails = failure.TechnicalDetails
+		return internal
+	}
 	if runtime := testDataExecutionFailure(err.Error()); runtime != nil {
 		runtime.TechnicalDetails = failure.TechnicalDetails
 		return runtime

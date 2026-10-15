@@ -29,6 +29,7 @@ const FAILURE_CATEGORY_LABELS: Record<string, string> = {
   duplicate_candidate: '题目内容重复', quality_review_required: '自动质量检查未通过', spec_lint_failed: '题意与约束检查未通过', verification_failed: '答案或数据验证问题',
   verification_unavailable: '执行服务连接问题', invalid_difficulty: '生成参数问题',
   verification_request_limit: '执行请求超过服务限制', testdata_generator_empty_output: '测试数据生成器输出为空',
+  test_manifest_boundary_refs_invalid: '出题流程内部格式问题', case_plan_input_normalization_failed: '出题流程输入规范化问题',
   statement_presentation_rejected: '题面表达检查未通过',
   oracle_identity_not_independent: '验证来源不够独立',
   unsupported_judge_contract: '流程能力限制',
@@ -84,6 +85,9 @@ export function generationFailureSummary(error: string, failure?: GenerationFail
   const emptyGenerator = failure?.code === 'testdata_generator_empty_output' || /generator case \d+ produced empty input/i.test(evidence);
   const presentationRejected = failure?.code === 'statement_presentation_rejected' || /(?:title|narrative) (?:contains normative or meta term|must not introduce normative operators)/i.test(evidence);
   const unsupportedJudge = failure?.code === 'unsupported_judge_contract' || /unsupported oracle judge contract|a special checker cannot use ordinary output comparison/i.test(evidence);
+  const manifestBoundaryRefs = failure?.code === 'test_manifest_boundary_refs_invalid' || /invalid TestManifest v2:\s*case "[^"\r\n]+" boundary_refs must be a present sorted unique array/i.test(evidence);
+  const casePlanNormalization = failure?.code === 'case_plan_input_normalization_failed' || /materialize S3 case plan|MaterializeS3CasePlanActivityV1/i.test(evidence) && /case "[^"\r\n]+" is not canonical SemanticSpec input:\s*<nil>/i.test(evidence);
+  const internalDataContract = (manifestBoundaryRefs || casePlanNormalization) && !authoringFormat && !reviewerFormat;
 
   if (failure?.code === 'oracle_identity_not_independent') {
     category = '验证来源不够独立'; stage = '独立解法验证';
@@ -103,6 +107,17 @@ export function generationFailureSummary(error: string, failure?: GenerationFail
     else if (/invalid character|invalid json|not a complete json object|unexpected end|unexpected eof/i.test(evidence)) reason = model + '没有返回单个完整、合法的 JSON 对象，可能混入额外文字、缺少引号或括号。';
     suggestion = '检查' + model + '的结构化输出能力。格式纠正后仍失败时，换用更稳定的模型或精简输出后重试未完成题目；无需修改目标难度。';
     retryable ??= false;
+  } else if (internalDataContract) {
+    category = manifestBoundaryRefs ? '出题流程内部格式问题' : '出题流程输入规范化问题';
+    stage = manifestBoundaryRefs ? '检查测试数据覆盖' : '整理验证用例';
+    message = manifestBoundaryRefs ? '测试数据清单的内部格式未通过校验。' : '验证用例的输入规范化流程未能完成。';
+    reason = manifestBoundaryRefs
+      ? '流程没有按内部约定保存测试用例的边界覆盖列表，列表必须始终存在、排序且不含重复项。这项错误不能证明题目文件缺失或答案有误。'
+      : '用例输入在转换成约定格式时被流程的一致性检查拦住，但记录中没有实际解析错误。这是输入规范化流程需要修复的问题，不能据此认定题目有误或测试文件缺失。';
+    suggestion = manifestBoundaryRefs
+      ? '管理员需修复测试清单的列表保存与校验流程，再重试未完成题目；无需因此修改题目需求或目标难度。'
+      : '管理员需修复用例输入的规范化与一致性检查，再重试未完成题目；无需因此修改模型、题目需求或目标难度。';
+    retryable = false;
   } else if (requestLimit) {
     category = '执行请求超过服务限制'; stage = '提交程序执行请求';
     message = '出题流程提交的执行请求超过服务限制。';
@@ -194,7 +209,7 @@ export function generationFailureSummary(error: string, failure?: GenerationFail
   }
 
   const legacyClassification = failure && !failure.category && !failure.stage && !failure.reason;
-  const generic = legacyClassification && (failure.code === 'generation_failed' || (testDataFormat || statementFormat || requestLimit || emptyGenerator || presentationRejected || unsupportedJudge) && ['verification_unavailable', 'verification_failed'].includes(failure.code));
+  const generic = legacyClassification && (failure.code === 'generation_failed' || (testDataFormat || statementFormat || internalDataContract || requestLimit || emptyGenerator || presentationRejected || unsupportedJudge) && ['verification_unavailable', 'verification_failed'].includes(failure.code));
   if (!generic && failure?.message?.trim() && /[\u3400-\u9fff]/.test(failure.message) && !/workflow execution|activity error|application error|retryable:/i.test(failure.message)) message = failure.message.trim();
   if (!generic && failure?.suggestion?.trim()) suggestion = failure.suggestion.trim();
   if (failure?.category) category = /[\u3400-\u9fff]/.test(failure.category) ? failure.category.trim() : FAILURE_CATEGORY_LABELS[failure.category] || category;

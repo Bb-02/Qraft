@@ -345,3 +345,43 @@ test('structured oracle identity failures do not invent an output mismatch or ma
   assert.match(judging.reason, /不能用普通输出比较代替/);
   assert.doesNotMatch(judging.suggestion, /人工/);
 });
+
+test('internal manifest and input normalization failures are not presented as missing files or model faults', () => {
+  const cases = [
+    ['verification_failed', 'build S3 TestManifest v2: activity error (type: BuildS3TestManifestActivityV1): validate automatic boundary coverage: invalid TestManifest v2: case "synthetic-case-a" boundary_refs must be a present sorted unique array', '出题流程内部格式问题', '检查测试数据覆盖', /列表保存与校验流程/],
+    ['generation_failed', 'materialize S3 case plan: activity error (type: MaterializeS3CasePlanActivityV1): case "synthetic-case-b" is not canonical SemanticSpec input: <nil>', '出题流程输入规范化问题', '整理验证用例', /规范化与一致性检查/],
+  ];
+  for (const [code, technical, category, stage, action] of cases) {
+    const failure = { code, message: '参考解法或测试数据需要检查', suggestion: '打开候选题补齐测试文件', technical_details: technical, retryable: true };
+    for (const candidate of ['none', 'incomplete']) {
+      const summary = failures.generationFailureSummary(failure.message, failure, 'set', candidate);
+      assert.equal(summary.category, category);
+      assert.equal(summary.stage, stage);
+      assert.match(summary.suggestion, action);
+      assert.match(summary.suggestion, /修复/);
+      assert.match(summary.suggestion, /重试未完成题目/);
+      assert.doesNotMatch(summary.suggestion, /补齐|人工审核|更换模型|提高难度/);
+      assert.notEqual(summary.message, failure.message);
+      assert.notEqual(summary.reason, '测试数据或题目文件缺失，或尚未通过完整性与有效性检查。');
+      assert.equal(summary.technicalDetails, technical);
+      assert.equal(summary.retryable, false);
+    }
+    const html = renderSlot({ ...slot, status: 'failed', regenerate: true, failure, error: failure.message });
+    assert.match(html, /流程/);
+    assert.match(html, /技术详情/);
+    assert.match(html, /直接重复重试通常无效/);
+    assert.doesNotMatch(html, /人工审核并恢复原题位|打开候选题补齐测试文件/);
+  }
+  const shared = Array.from({ length: 3 }, (_, index) => ({ status: 'failed', failure: { code: cases[0][0], message: '参考解法或测试数据需要检查', technical_details: cases[0][1].replace('synthetic-case-a', 'synthetic-case-' + index) } }));
+  shared.push({ status: 'failed', failure: { code: cases[1][0], message: '这道题未能完成生成', technical_details: cases[1][1] } });
+  const common = failures.commonGenerationFailure(shared);
+  assert.equal(common.count, 3);
+  assert.equal(common.summary.category, '出题流程内部格式问题');
+  for (const diagnostic of cases.map(item => item[1])) {
+    const quoted = failures.generationFailureSummary('parsing authoring-plan response: unknown field "quoted": ' + diagnostic);
+    assert.equal(quoted.category, '模型输出格式错误');
+    assert.equal(quoted.stage, '设计题意与约束');
+  }
+  const realParseError = failures.generationFailureSummary(cases[1][1].replace('<nil>', 'invalid integer'));
+  assert.notEqual(realParseError.category, '出题流程输入规范化问题');
+});
