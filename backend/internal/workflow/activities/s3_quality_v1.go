@@ -479,7 +479,7 @@ func (a *Activities) GenerateS3TestDataActivityV1(ctx context.Context, in Genera
 	if err != nil {
 		return nil, err
 	}
-	if err := a.validateS3GeneratedTestDataCoverageV4(ctx, *bundle.SemanticSpec, *bundle.AuthoringPlan, *result); err != nil {
+	if err := a.validateS3GeneratedTestDataCoverageV5(ctx, *bundle.SemanticSpec, *bundle.AuthoringPlan, *result); err != nil {
 		return nil, err
 	}
 	return result, nil
@@ -492,11 +492,11 @@ const maxS3TypedTestDataContextBytesV1 = 96 << 10
 // materializer will enforce. The typed context is advisory to the model but
 // authoritative to the server after generation.
 func enrichS3TestDataParamsV1(params domain.ProblemGenParams, spec domain.SemanticSpecV1, plan domain.AuthoringPlanV1) (domain.ProblemGenParams, error) {
-	derived, err := DeriveIntegerBoundaryCasePlanV1(spec, plan)
+	derived, err := DeriveInputBoundaryCasePlanV3(spec, plan)
 	if err != nil {
 		return domain.ProblemGenParams{}, err
 	}
-	_, derivedSHA, err := CanonicalIntegerBoundaryCasePlanV1(*derived, boundaryCoverageRuleForSpecV1(spec))
+	_, derivedSHA, err := CanonicalIntegerBoundaryCasePlanV1(*derived, inputBoundaryCasePlanRuleForSpecV3(spec))
 	if err != nil {
 		return domain.ProblemGenParams{}, err
 	}
@@ -516,7 +516,7 @@ func enrichS3TestDataParamsV1(params domain.ProblemGenParams, spec domain.Semant
 		return domain.ProblemGenParams{}, fmt.Errorf("typed test-data context exceeds %d bytes", maxS3TypedTestDataContextBytesV1)
 	}
 	const prefix = "SERVER-AUTHORED TYPED TEST-DATA CONTRACT (authoritative; do not override with prose):\n"
-	const suffix = s3DerivedCoverageInstructionsV4
+	const suffix = s3DerivedCoverageInstructionsV5
 	params.CustomPrompt = strings.TrimSpace(params.CustomPrompt)
 	if params.CustomPrompt != "" {
 		params.CustomPrompt += "\n\n"
@@ -582,8 +582,12 @@ func (a *Activities) MaterializeS3CasePlanActivityV1(ctx context.Context, in Mat
 	if bundle.AuthoringPlan.SemanticSpecSHA256 != semanticSHA {
 		return nil, s3ContractErrorV1("case-plan authoring ancestry mismatch")
 	}
-	if _, err := DeriveIntegerBoundaryCasePlanV1(*bundle.SemanticSpec, *bundle.AuthoringPlan); err != nil {
+	if _, err := DeriveInputBoundaryCasePlanV3(*bundle.SemanticSpec, *bundle.AuthoringPlan); err != nil {
 		return nil, s3QualityErrorV1("derive case-plan obligations: %v", err)
+	}
+	inputScope, err := deriveInputBoundaryCoverageScopeV3(*bundle.SemanticSpec)
+	if err != nil {
+		return nil, s3ContractErrorV1("derive case-plan input scope: %v", err)
 	}
 	testIdentity, err := canonicalJSONSHA256(in.TestData)
 	if err != nil {
@@ -591,7 +595,7 @@ func (a *Activities) MaterializeS3CasePlanActivityV1(ctx context.Context, in Mat
 	}
 	plan := S3CasePlanBundleV1{SchemaVersion: S3CasePlanSchemaV1, SemanticSpecSHA256: semanticSHA, AuthoringBundleSHA256: in.ExpectedAuthoringBundleSHA, TestDataIdentitySHA256: testIdentity, Cases: make([]S3ManifestCasePlanV1, len(in.TestData.TestCases)), SanitizerCaseIDs: []string{}}
 	plan.InputParserRuleVersion = speccontract.TestCaseInputParserRuleVersionForSpecV2(*bundle.SemanticSpec)
-	plan.ConstraintRegionRuleVersion = ConstraintRegionMatchingRuleVersionV2
+	plan.ConstraintRegionRuleVersion = ConstraintRegionMatchingRuleVersionV3
 	sanitizerIdentities := make([]struct {
 		TestID      string `json:"test_id"`
 		InputSHA256 string `json:"input_sha256"`
@@ -645,7 +649,7 @@ func (a *Activities) MaterializeS3CasePlanActivityV1(ctx context.Context, in Mat
 		boundaryRefs := make([]string, 0)
 		boundaryHit := map[string]bool{}
 		zeroHit := false
-		for _, boundary := range bundle.SemanticSpec.Boundaries {
+		for _, boundary := range inputScope.Boundaries {
 			if boundary.Allowed && integerBoundaryHitV1(boundary, bindings) {
 				boundaryRefs = append(boundaryRefs, boundary.ID)
 				boundaryHit[boundary.ID] = true
@@ -654,7 +658,7 @@ func (a *Activities) MaterializeS3CasePlanActivityV1(ctx context.Context, in Mat
 		}
 		sort.Strings(boundaryRefs)
 		minHit, maxHit := false, false
-		for _, constraint := range bundle.SemanticSpec.Constraints {
+		for _, constraint := range inputScope.Constraints {
 			if constraint.Min != nil {
 				minHit = minHit || integerConstraintEdgeHitV1(constraint, *constraint.Min, bindings)
 			}
@@ -2177,7 +2181,7 @@ func (a *Activities) loadS3CasePlanV1(ctx context.Context, ref ArtifactRef) (*S3
 	if err := decodeCanonicalSampleClosureJSONV1(data, &plan); err != nil || plan.SchemaVersion != S3CasePlanSchemaV1 || !isManifestSHA256(plan.SemanticSpecSHA256) || !isManifestSHA256(plan.AuthoringBundleSHA256) || !isManifestSHA256(plan.TestDataIdentitySHA256) || !isManifestSHA256(plan.SanitizerSuiteSHA256) || len(plan.Cases) == 0 || len(plan.SanitizerCaseIDs) == 0 || len(plan.SanitizerCaseIDs) > maxS3SanitizerCasesV1 {
 		return nil, nil, s3ContractErrorV1("S3 case plan is not canonical or complete")
 	}
-	if plan.ConstraintRegionRuleVersion != "" && (plan.ConstraintRegionRuleVersion != ConstraintRegionMatchingRuleVersionV2 || (plan.InputParserRuleVersion != speccontract.TestCaseInputParserRuleVersionV2 && plan.InputParserRuleVersion != speccontract.TestCaseInputParserTokenStringsRuleVersionV2)) {
+	if plan.ConstraintRegionRuleVersion != "" && ((plan.ConstraintRegionRuleVersion != ConstraintRegionMatchingRuleVersionV2 && plan.ConstraintRegionRuleVersion != ConstraintRegionMatchingRuleVersionV3) || (plan.InputParserRuleVersion != speccontract.TestCaseInputParserRuleVersionV2 && plan.InputParserRuleVersion != speccontract.TestCaseInputParserTokenStringsRuleVersionV2)) {
 		return nil, nil, s3ContractErrorV1("S3 case plan has an invalid constraint-region rule or input parser phase")
 	}
 	caseByID := make(map[string]S3ManifestCasePlanV1, len(plan.Cases))

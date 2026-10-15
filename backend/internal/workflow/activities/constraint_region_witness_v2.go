@@ -6,7 +6,10 @@ import (
 	"strings"
 )
 
-const ConstraintRegionMatchingRuleVersionV2 = "algoforge.constraint-region-matching.rules.v2"
+const (
+	ConstraintRegionMatchingRuleVersionV2 = "algoforge.constraint-region-matching.rules.v2"
+	ConstraintRegionMatchingRuleVersionV3 = "algoforge.constraint-region-matching.rules.v3"
+)
 
 // ConstraintRegionCaseWitnessV2 contains only hits already proved by parsing
 // the exact CAS bytes against the authoritative SemanticSpec.
@@ -40,7 +43,7 @@ func (err *ConstraintRegionCoverageErrorV2) Error() string {
 // partition of the input domain. The earliest matching test ID is selected so
 // witness bytes are stable and do not depend on map iteration.
 func DeriveConstraintRegionWitnessesV2(plan IntegerBoundaryCasePlanV1, cases []ConstraintRegionCaseWitnessV2) ([]ConstraintRegionWitnessV2, error) {
-	if plan.RuleVersion != IntegerBoundaryCoverageRuleVersion && plan.RuleVersion != TokenStringBoundaryCoverageRuleVersionV2 {
+	if plan.RuleVersion != IntegerBoundaryCoverageRuleVersion && plan.RuleVersion != TokenStringBoundaryCoverageRuleVersionV2 && plan.RuleVersion != IntegerInputBoundaryCasePlanRuleVersionV3 && plan.RuleVersion != TokenStringInputBoundaryCasePlanRuleVersionV3 {
 		return nil, fmt.Errorf("constraint-region witnesses require the authoritative derived-plan rule")
 	}
 	if _, _, err := CanonicalIntegerBoundaryCasePlanV1(plan, plan.RuleVersion); err != nil {

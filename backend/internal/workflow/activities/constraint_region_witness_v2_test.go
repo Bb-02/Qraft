@@ -162,7 +162,7 @@ func TestS3MultiRegionMaterializerOracleManifestAndStoreKeepAllTwelveCases(t *te
 	})
 	plan, _, err := f.acts.loadS3CasePlanV1(context.Background(), f.oracleInput.CasePlanArtifact)
 	require.NoError(t, err)
-	require.Equal(t, ConstraintRegionMatchingRuleVersionV2, plan.ConstraintRegionRuleVersion)
+	require.Equal(t, ConstraintRegionMatchingRuleVersionV3, plan.ConstraintRegionRuleVersion)
 	for _, item := range plan.Cases {
 		require.Equal(t, "general", item.ConstraintRegion, "primary scoring group remains unchanged")
 	}
@@ -194,8 +194,8 @@ func TestS3MultiRegionMaterializerOracleManifestAndStoreKeepAllTwelveCases(t *te
 	require.NoError(t, err)
 	var coverage IntegerBoundaryCoverageReceiptV1
 	require.NoError(t, json.Unmarshal(raw, &coverage))
-	require.Equal(t, FullCaseTokenStringMultiRegionCoverageRuleVersionV3, coverage.RuleVersion)
+	require.Equal(t, FullCaseTokenStringInputScopeCoverageRuleVersionV4, coverage.RuleVersion)
 	require.Equal(t, manifest.RegionWitnesses, coverage.RegionWitnesses)
-	_, _, err = CanonicalIntegerBoundaryCoverageReceiptV1(coverage, FullCaseTokenStringMultiRegionCoverageRuleVersionV3)
+	_, _, err = CanonicalIntegerBoundaryCoverageReceiptV1(coverage, FullCaseTokenStringInputScopeCoverageRuleVersionV4)
 	require.NoError(t, err)
 }

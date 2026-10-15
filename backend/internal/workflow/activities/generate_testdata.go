@@ -176,7 +176,7 @@ func (a *Activities) GenerateTestDataActivity(
 
 // The S3 adapter chooses its server-owned output/effect contract separately;
 // ordinary and source-preserving import generation retain their existing keys.
-func (a *Activities) generateTestDataActivity(ctx context.Context, statement string, config domain.TestDataConfig, params domain.ProblemGenParams, s3CoverageV4 bool) (*TestDataResult, error) {
+func (a *Activities) generateTestDataActivity(ctx context.Context, statement string, config domain.TestDataConfig, params domain.ProblemGenParams, s3InputCoverageV5 bool) (*TestDataResult, error) {
 	if err := config.NormalizeForGeneration(); err != nil {
 		return nil, temporal.NewNonRetryableApplicationError(
 			"invalid test-data configuration: "+err.Error(),
@@ -236,7 +236,7 @@ func (a *Activities) generateTestDataActivity(ctx context.Context, statement str
 			return nil
 		})
 	} else {
-		resp, sourceArtifact, sourceArtifacts, structuredResult, err = a.completeTestDataStructuredV3(ctx, req, s3CoverageV4)
+		resp, sourceArtifact, sourceArtifacts, structuredResult, err = a.completeTestDataStructuredV3(ctx, req, s3InputCoverageV5)
 	}
 	stopHB()
 	if err != nil {

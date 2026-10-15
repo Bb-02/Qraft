@@ -15,6 +15,8 @@ const (
 	testDataRepairPromptIDV3   = "testdata_format_repair_v3"
 	s3TestDataPromptIDV4       = "s3_testdata_generator_v4"
 	s3TestDataRepairPromptIDV4 = "s3_testdata_format_repair_v4"
+	s3TestDataPromptIDV5       = "s3_testdata_generator_v5"
+	s3TestDataRepairPromptIDV5 = "s3_testdata_format_repair_v5"
 )
 
 // Compatible chat gateways do not all implement assistant prefill. Ask for a
@@ -39,12 +41,12 @@ func testDataFullObjectRequestV3(original *llm.Request) *llm.Request {
 // One separately cached format correction handles transport/JSON mistakes.
 // It does not repair execution failures or change the problem's constraints;
 // all generator, count, input, oracle and coverage gates still run normally.
-func (a *Activities) completeTestDataStructuredV3(ctx context.Context, original *llm.Request, s3CoverageV4 ...bool) (*llm.Response, *ArtifactRef, []*ArtifactRef, *TestDataResult, error) {
+func (a *Activities) completeTestDataStructuredV3(ctx context.Context, original *llm.Request, s3InputCoverageV5 ...bool) (*llm.Response, *ArtifactRef, []*ArtifactRef, *TestDataResult, error) {
 	req := testDataFullObjectRequestV3(original)
 	repairPromptID := testDataRepairPromptIDV3
-	if len(s3CoverageV4) != 0 && s3CoverageV4[0] {
-		req.PromptID, req.PromptVersion = s3TestDataPromptIDV4, "v4"
-		repairPromptID = s3TestDataRepairPromptIDV4
+	if len(s3InputCoverageV5) != 0 && s3InputCoverageV5[0] {
+		req.PromptID, req.PromptVersion = s3TestDataPromptIDV5, "v5"
+		repairPromptID = s3TestDataRepairPromptIDV5
 	}
 	var refs []*ArtifactRef
 	for attempt := 0; attempt < 2; attempt++ {
