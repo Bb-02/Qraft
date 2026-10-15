@@ -6,14 +6,84 @@ const vm = require('node:vm');
 const ts = require('typescript');
 const React = require('react');
 const { renderToStaticMarkup } = require('react-dom/server');
-function load(relative, dependencies = {}) {
+function load(relative, dependencies = {}, globals = {}) {
  const filename=path.resolve(__dirname, relative);
  const code=ts.transpileModule(fs.readFileSync(filename,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.React,esModuleInterop:true}}).outputText;
  const m={exports:{}};
- vm.runInNewContext(code,{module:m,exports:m.exports,URLSearchParams,require:name=>name in dependencies?dependencies[name]:require(name)},{filename});
+ vm.runInNewContext(code,{module:m,exports:m.exports,React,Error,URL,URLSearchParams,...globals,require:name=>name in dependencies?dependencies[name]:require(name)},{filename});
  return m.exports;
 }
 const locations=load('./problem-list-location.ts',{'./constants':{DEFAULT_PAGE_SIZE:20}});
+const providerErrors=load('./provider-settings-error.ts');
+test('model connection 404 explains a proven protocol conflict and preserves redacted diagnostics',()=>{
+ const diagnostic='provider connection check: openai-chat api error (status 404, type "provider_error"): Not Found';
+ const conflict=providerErrors.providerConnectionFailureSummary(diagnostic,'https://synthetic.example/anthropic/');
+ assert.match(conflict.message,/协议与地址不匹配/);
+ assert.match(conflict.message,/Anthropic/);
+ assert.match(conflict.message,/本次配置尚未保存/);
+ assert.equal(conflict.details,diagnostic);
+ for(const endpoint of ['https://synthetic.example/v1','https://anthropic.synthetic.example/v1','https://synthetic.example/v1?path=/anthropic']) {
+  const unknown=providerErrors.providerConnectionFailureSummary(diagnostic,endpoint);
+  assert.match(unknown.message,/请求接口或模型/);
+  assert.doesNotMatch(unknown.message,/协议与地址不匹配/);
+ }
+ const actualAnthropic=providerErrors.providerConnectionFailureSummary(diagnostic.replace('openai-chat','anthropic-messages'),'https://synthetic.example/anthropic');
+ assert.doesNotMatch(actualAnthropic.message,/协议与地址不匹配/);
+ for(const text of [diagnostic.replace('status 404','status 401'),diagnostic.replace('status 404','status 429'), 'provider connection check: invalid response: '+diagnostic, '中文保存错误']) {
+  assert.equal(providerErrors.providerConnectionFailureSummary(text,'https://synthetic.example/anthropic'),undefined);
+ }
+});
+
+test('settings save displays a readable connection failure with collapsed secret-free technical details',async()=>{
+ const states=[],effects=[],calls=[]; let cursor=0,started=false;
+ const initial={base_url:'https://synthetic.example/anthropic',model:'synthetic-chat',api_key_configured:false,override_configured:true};
+ const api={
+  async getPermanentLLMSettings(){return {data:{statement:initial,verification:initial,review:initial}};},
+  async getEmbeddingRuntimeSettings(){return {data:{base_url:'',model:'',api_key_configured:false}};},
+  async updatePermanentLLMSetting(purpose,payload){
+   calls.push({purpose,payload});
+   throw new Error('provider connection check: openai-chat api error (status 404, type "provider_error"): Not Found synthetic-test-secret');
+  },
+ };
+ const Page=load('../app/settings/page.tsx',{
+  react:{...React,
+   useState(initial){const index=cursor++;if(!(index in states))states[index]=typeof initial==='function'?initial():initial;return [states[index],value=>{states[index]=typeof value==='function'?value(states[index]):value;}];},
+   useCallback:callback=>callback,
+   useEffect:callback=>{if(!started)effects.push(callback);},
+  },
+  'next/link':({children,...props})=>React.createElement('a',props,children),
+  '@/components/ui/Workspace':{PageHeader:()=>null},
+  '@/components/ApiHealthBanner':()=>null,
+  '@/lib/api':api,
+  '@/lib/provider-settings-error':providerErrors,
+ },{window:{location:{search:'?section=verification'}}}).default;
+ const render=()=>{cursor=0;return Page();};
+ function find(node,predicate){
+  if(Array.isArray(node)){for(const child of node){const result=find(child,predicate);if(result)return result;}}
+  else if(React.isValidElement(node)){if(predicate(node))return node;return find(node.props.children,predicate);}
+ }
+ render();started=true;effects.forEach(effect=>effect());
+ await new Promise(resolve=>setImmediate(resolve));
+ let card=find(render(),node=>node.props.purpose==='verification');
+ assert.ok(card);
+ card.props.onChange({...card.props.form,api_key:'synthetic-test-secret'});
+ card=find(render(),node=>node.props.purpose==='verification');
+ card.props.onSave();
+ await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(calls.length,1);
+ assert.equal(calls[0].purpose,'verification');
+ assert.equal(calls[0].payload.base_url,initial.base_url);
+ assert.equal(calls[0].payload.protocol,undefined);
+ const alert=find(render(),node=>node.props.role==='alert');
+ assert.ok(alert);
+ const html=renderToStaticMarkup(alert);
+ assert.match(html,/协议与地址不匹配/);
+ assert.match(html,/本次配置尚未保存/);
+ assert.match(html,/<details><summary[^>]*>技术详情<\/summary>/);
+ assert.match(html,/provider connection check: openai-chat api error/);
+ assert.match(html,/\[已隐藏\]/);
+ assert.doesNotMatch(html,/synthetic-test-secret/);
+});
 test('list/detail/edit round trip retains pagination, filters, sort and destination set',()=>{
  const filter={page:7,size:50,search:'sum & difference',level:'algorithm',status:'draft',difficulty_min:800,difficulty_max:1200,tags:['dp','tree'],sort_by:'difficulty',sort_order:'asc'};
  const list=locations.problemListHref(filter,'synthetic-set');

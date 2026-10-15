@@ -15,6 +15,7 @@ import {
 
 import { PageHeader } from '@/components/ui/Workspace';
 import ApiHealthBanner from '@/components/ApiHealthBanner';
+import { providerConnectionFailureSummary, type ProviderConnectionFailureSummary } from '@/lib/provider-settings-error';
 import {
   deployLocalEmbeddingModel,
   getEmbeddingRuntimeSettings,
@@ -468,7 +469,7 @@ export default function SettingsPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState<LLMProviderPurpose>();
   const [embeddingAction, setEmbeddingAction] = useState<'test' | 'save'>();
-  const [error, setError] = useState<string>();
+  const [error, setError] = useState<string | ProviderConnectionFailureSummary>();
   const [embeddingError, setEmbeddingError] = useState<string>();
   const [success, setSuccess] = useState<string>();
 
@@ -579,9 +580,8 @@ export default function SettingsPage() {
       };
       setSuccess(`${labels[purpose]}配置已保存。`);
     } catch (cause) {
-      setError(
-        safeErrorMessage(cause, '保存模型配置失败', [form.api_key]),
-      );
+      const message = safeErrorMessage(cause, '保存模型配置失败', [form.api_key]);
+      setError(providerConnectionFailureSummary(message, form.base_url) ?? message);
     } finally {
       setSaving(undefined);
     }
@@ -740,7 +740,10 @@ export default function SettingsPage() {
   return <div className="af-page af-settings-page">
     <PageHeader eyebrow="工作区设置" title="模型设置" description="配置生成、验算与评审模型。只需服务地址、模型名称和密钥。" />
     <ApiHealthBanner />
-    {error && <div role="alert" className="af-error-banner">{error}</div>}
+    {error && <div role="alert" className="af-error-banner">{typeof error === 'string' ? error : <div className="min-w-0 space-y-2">
+      <p>{error.message}</p>
+      <details><summary className="cursor-pointer text-xs">技术详情</summary><pre className="mt-2 whitespace-pre-wrap break-words text-xs">{error.details}</pre></details>
+    </div>}</div>}
     {success && <div role="status" className="af-success-banner"><CheckCircle2 size={16} />{success}</div>}
     <div className="af-settings-layout">
       <aside className="af-settings-navigation">
