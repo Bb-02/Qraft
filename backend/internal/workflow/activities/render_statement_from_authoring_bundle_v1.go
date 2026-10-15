@@ -377,6 +377,9 @@ func decodeCanonicalAuthoringBundleV1(data []byte) (*AuthoringPlanBundleV1, erro
 	if !bytes.Equal(canonical, data) {
 		return nil, fmt.Errorf("authoring bundle bytes are not canonical JSON")
 	}
+	if err := validateAuthoringIntentBindingV5(&bundle); err != nil {
+		return nil, err
+	}
 	return &bundle, nil
 }
 
@@ -386,6 +389,9 @@ func validateAcceptedAuthoringBundleForStatementV1(
 ) error {
 	if bundle == nil {
 		return fmt.Errorf("authoring bundle is required")
+	}
+	if err := validateAuthoringIntentBindingV5(bundle); err != nil {
+		return err
 	}
 	if bundle.SchemaVersion != AuthoringPlanBundleSchemaV1 || bundle.DerivationRule != authoringPlanDerivationRuleV1 {
 		return fmt.Errorf("unsupported authoring bundle schema or derivation rule")

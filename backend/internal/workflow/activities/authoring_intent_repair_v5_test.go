@@ -58,6 +58,8 @@ func TestAuthoringIntentRepairV5CorrectsOnlyPlanAndRetainsBothSources(t *testing
 	require.NoError(t, json.Unmarshal(store.objects[result.BundleSHA256], &bundle))
 	require.Equal(t, result.SourceArtifacts[0].SHA256, bundle.SourceArtifactSHA256)
 	require.Equal(t, result.SourceArtifacts[1].SHA256, bundle.TestIntentRepairArtifact.SHA256)
+	require.Equal(t, bundle.TestIntentRepairArtifact, result.TestIntentRepairArtifact)
+	require.Equal(t, bundle.OriginalTestIntentPlanSHA256, result.OriginalTestIntentPlanSHA256)
 	original.SemanticSpec.SchemaVersion, original.SemanticSpec.BriefSHA256 = domain.SemanticSpecSchemaV1, in.CanonicalBriefSHA256
 	original.AuthoringPlan.SchemaVersion, original.AuthoringPlan.BriefSHA256 = domain.AuthoringPlanSchemaV1, in.CanonicalBriefSHA256
 	original.AuthoringPlan.SemanticSpecSHA256 = speccontract.SemanticSpecSHA256V1(*original.SemanticSpec)

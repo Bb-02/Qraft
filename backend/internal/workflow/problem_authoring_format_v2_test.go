@@ -105,6 +105,82 @@ func TestAuthoringResultAcceptsV4CapabilitiesCorrectionWithoutRelabelingV3(t *te
 	}
 }
 
+func correctedAuthoringWorkflowResultV5(t *testing.T, input activities.GenerateAuthoringPlanInput) *activities.GenerateAuthoringPlanResult {
+	t.Helper()
+	result := correctedAuthoringWorkflowResultV2(t, input)
+	result.SourceArtifacts[0].LLMCallReceipt.PromptID = activities.AuthoringPlanPromptIDV5
+	result.SourceArtifacts[1].LLMCallReceipt.PromptID = activities.AuthoringPlanFormatRepairPromptIDV5
+	result.SourceArtifacts[0].LLMCallReceipt.PromptVersion, result.SourceArtifacts[1].LLMCallReceipt.PromptVersion = "v5", "v5"
+	return result
+}
+
+func TestAuthoringResultAcceptsV5CorrectionWithItsStrictProviderIdentity(t *testing.T) {
+	_, _, input := newAuthoringWorkflowEnvironment(t)
+	result := correctedAuthoringWorkflowResultV5(t, input)
+	if err := validateAuthoringWorkflowResultV1(input, result); err != nil {
+		t.Fatalf("valid v5 correction rejected: %v", err)
+	}
+	result.Decision, result.GateReasonCode = activities.AuthoringPlanDecisionRejected, activities.AuthoringPlanGateReasonSpecLintFailed
+	result.RejectionReason, result.LintPassed, result.LintErrorCount = "synthetic real lint failure", false, 1
+	if err := validateAuthoringWorkflowResultV1(input, result); err != nil {
+		t.Fatalf("v5 correction must preserve a real lint rejection: %v", err)
+	}
+}
+
+func TestAuthoringResultRejectsMixedOrUnboundV5Correction(t *testing.T) {
+	_, _, input := newAuthoringWorkflowEnvironment(t)
+	mutations := map[string]func(*activities.GenerateAuthoringPlanResult){
+		"old initial prompt": func(result *activities.GenerateAuthoringPlanResult) {
+			result.SourceArtifacts[0].LLMCallReceipt.PromptID = activities.AuthoringPlanPromptIDV4
+		},
+		"old correction prompt": func(result *activities.GenerateAuthoringPlanResult) {
+			result.SourceArtifacts[1].LLMCallReceipt.PromptID = activities.AuthoringPlanFormatRepairPromptIDV4
+		},
+		"old initial version": func(result *activities.GenerateAuthoringPlanResult) {
+			result.SourceArtifacts[0].LLMCallReceipt.PromptVersion = "v4"
+		},
+		"old correction version": func(result *activities.GenerateAuthoringPlanResult) {
+			result.SourceArtifacts[1].LLMCallReceipt.PromptVersion = "v4"
+		},
+		"same request reused": func(result *activities.GenerateAuthoringPlanResult) {
+			result.SourceArtifacts[1].LLMCallReceipt.RequestSHA256 = result.SourceArtifacts[0].LLMCallReceipt.RequestSHA256
+		},
+		"provider order reversed": func(result *activities.GenerateAuthoringPlanResult) {
+			result.SourceArtifacts[0], result.SourceArtifacts[1] = result.SourceArtifacts[1], result.SourceArtifacts[0]
+		},
+		"endpoint changed": func(result *activities.GenerateAuthoringPlanResult) {
+			result.SourceArtifacts[1].LLMCallReceipt.EndpointID = strings.Repeat("9", 64)
+		},
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			result := correctedAuthoringWorkflowResultV5(t, input)
+			mutate(result)
+			if err := validateAuthoringWorkflowResultV1(input, result); err == nil {
+				t.Fatal("mixed or unbound v5 correction accepted")
+			}
+		})
+	}
+}
+
+func TestAuthoringWorkflowConsumesV5CorrectedResultWithoutRegenerating(t *testing.T) {
+	env, acts, input := newAuthoringWorkflowEnvironment(t)
+	want := correctedAuthoringWorkflowResultV5(t, input)
+	env.OnActivity(acts.GenerateAuthoringPlanActivity, mock.Anything, input).Return(want, nil).Once()
+	env.ExecuteWorkflow(ProblemGenerationAuthoringWorkflowV1, input)
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatalf("v5 corrected result failed workflow boundary: %v", err)
+	}
+	var got activities.GenerateAuthoringPlanResult
+	if err := env.GetWorkflowResult(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.BundleSHA256 != want.BundleSHA256 || len(got.SourceArtifacts) != 3 || !got.LintPassed {
+		t.Fatal("v5 corrected result lost its original evidence or lint outcome")
+	}
+	assertAuthoringWorkflowCallsOnlyFormalizer(t, env)
+}
+
 func TestAuthoringResultRejectsLintExplanationOnAcceptedOutcome(t *testing.T) {
 	_, _, input := newAuthoringWorkflowEnvironment(t)
 	result := acceptedAuthoringWorkflowResult(t, input)

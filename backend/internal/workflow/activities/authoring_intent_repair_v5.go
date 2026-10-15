@@ -16,7 +16,8 @@ import (
 const (
 	AuthoringPlanPromptIDV5             = "authoring_plan_input_coverage_v5"
 	AuthoringPlanFormatRepairPromptIDV5 = "authoring_plan_input_coverage_format_repair_v5"
-	authoringIntentRepairPromptIDV5     = "authoring_plan_test_intent_repair_v5_1"
+	AuthoringPlanIntentRepairPromptIDV5 = "authoring_plan_test_intent_repair_v5_1"
+	authoringIntentRepairPromptIDV5     = AuthoringPlanIntentRepairPromptIDV5
 	authoringIntentConflictErrorTypeV5  = "AuthoringPlanIntentConflictError"
 )
 

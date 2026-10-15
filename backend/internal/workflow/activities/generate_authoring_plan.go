@@ -52,21 +52,23 @@ type GenerateAuthoringPlanInput struct {
 // GenerateAuthoringPlanResult keeps Temporal history small. The full typed
 // contract and lint report are stored in BundleArtifact.
 type GenerateAuthoringPlanResult struct {
-	PayloadVersion     int                       `json:"payload_version"`
-	ModelDecision      string                    `json:"model_decision"`
-	Decision           string                    `json:"decision"`
-	GateReasonCode     string                    `json:"gate_reason_code,omitempty"`
-	RejectionReason    string                    `json:"rejection_reason,omitempty"`
-	InputSHA256        string                    `json:"input_sha256"`
-	BriefSHA256        string                    `json:"brief_sha256"`
-	SemanticSpecSHA256 string                    `json:"semantic_spec_sha256,omitempty"`
-	BundleSHA256       string                    `json:"bundle_sha256"`
-	BundleArtifact     *ArtifactRef              `json:"bundle_artifact"`
-	SourceArtifacts    []*ArtifactRef            `json:"source_artifacts"`
-	LintPassed         bool                      `json:"lint_passed"`
-	LintErrorCount     int                       `json:"lint_error_count"`
-	LintAdvisoryCount  int                       `json:"lint_advisory_count"`
-	Failure            *domain.GenerationFailure `json:"failure,omitempty"`
+	PayloadVersion               int                       `json:"payload_version"`
+	ModelDecision                string                    `json:"model_decision"`
+	Decision                     string                    `json:"decision"`
+	GateReasonCode               string                    `json:"gate_reason_code,omitempty"`
+	RejectionReason              string                    `json:"rejection_reason,omitempty"`
+	InputSHA256                  string                    `json:"input_sha256"`
+	BriefSHA256                  string                    `json:"brief_sha256"`
+	SemanticSpecSHA256           string                    `json:"semantic_spec_sha256,omitempty"`
+	BundleSHA256                 string                    `json:"bundle_sha256"`
+	BundleArtifact               *ArtifactRef              `json:"bundle_artifact"`
+	SourceArtifacts              []*ArtifactRef            `json:"source_artifacts"`
+	LintPassed                   bool                      `json:"lint_passed"`
+	LintErrorCount               int                       `json:"lint_error_count"`
+	LintAdvisoryCount            int                       `json:"lint_advisory_count"`
+	Failure                      *domain.GenerationFailure `json:"failure,omitempty"`
+	TestIntentRepairArtifact     *ArtifactRef              `json:"test_intent_repair_artifact,omitempty"`
+	OriginalTestIntentPlanSHA256 string                    `json:"original_test_intent_plan_sha256,omitempty"`
 }
 
 // AuthoringPlanBundleV1 is the immutable CAS payload consumed by later QG-02
@@ -253,6 +255,7 @@ func (a *Activities) GenerateAuthoringPlanActivity(ctx context.Context, in Gener
 				}
 				parsed.AuthoringPlan.TestIntents = intents
 				bundle.TestIntentRepairArtifact, bundle.OriginalTestIntentPlanSHA256 = repairSource, originalSHA
+				result.TestIntentRepairArtifact, result.OriginalTestIntentPlanSHA256 = bundle.TestIntentRepairArtifact, bundle.OriginalTestIntentPlanSHA256
 				result.SourceArtifacts = append(result.SourceArtifacts, repairSource)
 				lintInput.AuthoringPlan = *parsed.AuthoringPlan
 				lintReport = speccontract.LintV1(lintInput)
