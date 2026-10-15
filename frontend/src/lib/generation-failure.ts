@@ -47,7 +47,7 @@ const QUALITY_GATE_FAILURES: Record<string, { category: string; stage: string; r
   hidden_regression: { category: '额外验证尚未通过', stage: '运行额外验证', reason: '额外验证未能完成或结果需要检查；这项状态本身不代表题目已被证实有错。' },
 };
 
-const INCOMPLETE_CANDIDATE_SUGGESTION = '这道候选题需要重新生成，查看未通过项并修正需求后，重试未完成题目；旧候选仍保留。';
+const INCOMPLETE_CANDIDATE_SUGGESTION = '这道候选题需要重新生成。处理上述失败原因后，重试未完成题目；旧候选仍保留。';
 const MANUAL_REVIEW_SUGGESTION = /人工|管理员.*(?:确认|批准|审核|通过)/;
 
 function qualityFailureSuggestion(candidate?: GenerationCandidateState): string {

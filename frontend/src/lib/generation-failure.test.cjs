@@ -236,8 +236,9 @@ test('old and enriched spec lint failures explain constraints and prevent manual
     assert.equal(summary.category, '题意与约束检查未通过');
     assert.equal(summary.stage, '设计题意与约束');
     assert.match(summary.suggestion, /需要重新生成/);
+    assert.match(summary.suggestion, /处理上述失败原因后/);
     assert.match(summary.suggestion, /旧候选仍保留/);
-    assert.doesNotMatch(summary.suggestion, /人工确认|管理员|人工审核/);
+    assert.doesNotMatch(summary.suggestion, /人工确认|管理员|人工审核|修正需求/);
     assert.equal(summary.technicalDetails, failure.technical_details);
     const html = renderSlot({ ...slot, status: 'failed', regenerate: true, failure, error: failure.message });
     assert.match(html, /题意与约束检查未通过/);
@@ -368,9 +369,10 @@ test('internal manifest and input normalization failures are not presented as mi
     }
     const html = renderSlot({ ...slot, status: 'failed', regenerate: true, failure, error: failure.message });
     assert.match(html, /流程/);
+    assert.match(html, /处理上述失败原因后/);
     assert.match(html, /技术详情/);
     assert.match(html, /直接重复重试通常无效/);
-    assert.doesNotMatch(html, /人工审核并恢复原题位|打开候选题补齐测试文件/);
+    assert.doesNotMatch(html, /人工审核并恢复原题位|打开候选题补齐测试文件|修正需求/);
   }
   const shared = Array.from({ length: 3 }, (_, index) => ({ status: 'failed', failure: { code: cases[0][0], message: '参考解法或测试数据需要检查', technical_details: cases[0][1].replace('synthetic-case-a', 'synthetic-case-' + index) } }));
   shared.push({ status: 'failed', failure: { code: cases[1][0], message: '这道题未能完成生成', technical_details: cases[1][1] } });
