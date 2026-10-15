@@ -388,8 +388,8 @@ func TestSandboxReadinessHealthProbeOnlyGetsServerHealthAndRequiresCPPCapability
 		wantError  bool
 	}{
 		{"ready", `{"ready":true,"nsjail_ready":true,"cgroup_v2_ready":true,"languages":{"cpp":{"ready":true}}}`, 200, true, false},
-		{"missing cpp", `{"ready":true,"nsjail_ready":true,"cgroup_v2_ready":true,"languages":{}}`, 200, false, false},
-		{"not ready", `{"ready":false,"error":"private sandbox diagnostics"}`, 503, false, false},
+		{"missing cpp", `{"ready":true,"nsjail_ready":true,"cgroup_v2_ready":true,"languages":{}}`, 200, false, true},
+		{"not ready", `{"ready":false,"nsjail_ready":true,"cgroup_v2_ready":false,"languages":{"cpp":{"ready":true}},"error":"private sandbox diagnostics"}`, 503, false, false},
 		{"bad response", `{"error":"synthetic private diagnostic"}`, 500, false, true},
 		{"malformed", `not json`, 200, false, true},
 	} {

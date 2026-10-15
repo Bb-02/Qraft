@@ -268,7 +268,7 @@ func main() {
 		setGeneration := service.NewProblemSetGenerationService(problemSetService, problemSetRepo, problemService, tagRepo, temporalClient, cfg.Temporal.TaskQueue, service.NewProblemSetProviderResolver(llmSettingsHandler, runtimeKeyStore))
 		readinessOptions := service.ProblemSetGenerationReadinessOptions{
 			Providers:        service.NewProblemSetReadinessProviderResolver(llmSettingsHandler),
-			Sandbox:          service.NewProblemSetSandboxReadinessProbe(os.Getenv("SANDBOX_URL")),
+			Sandbox:          service.NewProblemSetSandboxReadinessProbeForAPI(os.Getenv("ALGOFORGE_WORKER_SANDBOX_READINESS_URL"), os.Getenv("SANDBOX_URL")),
 			EmbeddingEnabled: cfg.Embedding.Enabled, FallbackBaseURL: cfg.Anthropic.BaseURL,
 		}
 		setGeneration.SetGenerationProviderResolver(service.NewProblemSetProviderResolverForMode(llmSettingsHandler, runtimeKeyStore, readinessOptions))

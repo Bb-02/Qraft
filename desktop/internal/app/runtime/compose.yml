@@ -196,6 +196,7 @@ services:
       APP_DEV_MODE: 'true'
       LOG_LEVEL: ${LOG_LEVEL:-info}
       SERVER_PORT: '8080'
+      ALGOFORGE_WORKER_SANDBOX_READINESS_URL: http://worker:8092/generation/sandbox-readiness
     healthcheck:
       test:
       - CMD

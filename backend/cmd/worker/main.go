@@ -385,7 +385,7 @@ func main() {
 
 	healthServer := &http.Server{
 		Addr:              cfg.Outbox.HealthAddr,
-		Handler:           outboxRuntime.Handler(),
+		Handler:           service.NewWorkerSandboxReadinessHealthHandler(outboxRuntime.Handler(), os.Getenv("SANDBOX_URL")),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       5 * time.Second,
 		WriteTimeout:      5 * time.Second,

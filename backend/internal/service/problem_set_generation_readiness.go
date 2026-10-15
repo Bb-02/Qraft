@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -322,16 +323,21 @@ func NewProblemSetSandboxReadinessProbe(baseURL string) func(context.Context) (b
 		}
 		defer response.Body.Close()
 		var health struct {
-			Ready         bool `json:"ready"`
-			NsjailReady   bool `json:"nsjail_ready"`
-			CgroupV2Ready bool `json:"cgroup_v2_ready"`
+			Ready         *bool `json:"ready"`
+			NsjailReady   *bool `json:"nsjail_ready"`
+			CgroupV2Ready *bool `json:"cgroup_v2_ready"`
 			Languages     map[string]struct {
-				Ready bool `json:"ready"`
+				Ready *bool `json:"ready"`
 			} `json:"languages"`
 		}
-		if (response.StatusCode != http.StatusOK && response.StatusCode != http.StatusServiceUnavailable) || json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&health) != nil {
+		raw, err := io.ReadAll(io.LimitReader(response.Body, (64<<10)+1))
+		if err != nil || len(raw) > 64<<10 || (response.StatusCode != http.StatusOK && response.StatusCode != http.StatusServiceUnavailable) {
 			return false, fmt.Errorf("sandbox observation unavailable")
 		}
-		return response.StatusCode == http.StatusOK && health.Ready && health.NsjailReady && health.CgroupV2Ready && health.Languages["cpp"].Ready, nil
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		if decoder.Decode(&health) != nil || decoder.Decode(new(any)) != io.EOF || health.Ready == nil || health.NsjailReady == nil || health.CgroupV2Ready == nil || health.Languages["cpp"].Ready == nil || (response.StatusCode == http.StatusOK) != *health.Ready {
+			return false, fmt.Errorf("sandbox observation unavailable")
+		}
+		return *health.Ready && *health.NsjailReady && *health.CgroupV2Ready && *health.Languages["cpp"].Ready, nil
 	}
 }

@@ -55,6 +55,8 @@ curl -fsS "https://$QRAFT_DEPLOY_HOST/health"
 
 `up --wait` 与 `/health` 只证明服务启动和基础健康，不代表模型生成或证书续期已完成验证。初次拉镜像、数据库初始化和证书申请可能耗时；遇到超时先读日志，不删除数据卷重试。
 
+题集的生成前检查由 API 通过 worker 的内部健康端口读取沙箱状态，worker 再访问 `sandbox_internal` 网络中的真实 `/health`。该观测接口只返回“是否已确认”和“是否就绪”，不运行代码，也不接受目标地址；不要将 worker 的 8092 端口或沙箱执行端口公开。worker 尚未启动或连接暂时无法确认时，生成前检查会阻止开始，并提示重新检查。独立部署 API 与 worker 时，可用 `ALGOFORGE_WORKER_SANDBOX_READINESS_URL` 指定 worker 的固定 `/generation/sandbox-readiness` 地址；未设置该变量时，API 才使用原有 `SANDBOX_URL` 直连健康检查。
+
 ## 2. 初始化管理员，保存模型配置
 
 在服务器私密终端查看本实例的一次性令牌：

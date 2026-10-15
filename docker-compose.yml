@@ -216,6 +216,9 @@ services:
     environment:
       <<: *common-env
       SERVER_PORT: "8080"
+      # API observes readiness through the worker; execution stays on the
+      # separate internal sandbox network and has no public listener.
+      ALGOFORGE_WORKER_SANDBOX_READINESS_URL: http://worker:8092/generation/sandbox-readiness
     ports:
       - "127.0.0.1:${API_PORT:-18181}:8080"
     healthcheck:
