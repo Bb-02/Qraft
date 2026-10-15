@@ -369,9 +369,12 @@ func normalizeLLMProviderSettingUpdate(request *llmProviderSettingUpdate) error 
 
 	protocolHint := request.Protocol
 	if protocolHint == "" || protocolHint == "auto" {
+		endpointProtocol, knownEndpoint := llm.ProtocolFromBaseURL(request.BaseURL)
 		switch {
 		case request.BaseURL == "":
 			protocolHint = string(llm.ProtocolAnthropic)
+		case knownEndpoint:
+			protocolHint = string(endpointProtocol)
 		case hasKnownLLMModelPrefix(request.Model):
 			protocolHint = "auto"
 		default:
@@ -379,6 +382,7 @@ func normalizeLLMProviderSettingUpdate(request *llmProviderSettingUpdate) error 
 		}
 	}
 	resolvedProtocol, err := llm.ResolveProtocol(&llm.RuntimeConfig{
+		BaseURL:  request.BaseURL,
 		Provider: request.Provider,
 		Protocol: protocolHint,
 	}, request.Model)

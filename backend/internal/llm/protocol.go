@@ -23,7 +23,7 @@ const (
 )
 
 // ResolveProtocol honors an explicit runtime protocol and otherwise infers a
-// safe default from the model and provider identities.
+// safe default from a recognizable endpoint, then model and provider identities.
 func ResolveProtocol(runtime *RuntimeConfig, model string) (Protocol, error) {
 	configured := ""
 	provider := ""
@@ -33,6 +33,11 @@ func ResolveProtocol(runtime *RuntimeConfig, model string) (Protocol, error) {
 	}
 	switch configured {
 	case "", string(ProtocolAuto):
+		if runtime != nil {
+			if protocol, ok := ProtocolFromBaseURL(runtime.BaseURL); ok {
+				return protocol, nil
+			}
+		}
 		return inferProtocol(provider, model), nil
 	case string(ProtocolAnthropic), "anthropic", "messages", "claude":
 		return ProtocolAnthropic, nil
@@ -44,6 +49,27 @@ func ResolveProtocol(runtime *RuntimeConfig, model string) (Protocol, error) {
 		return ProtocolOpenAIChat, nil
 	default:
 		return "", fmt.Errorf("unsupported LLM protocol %q", configured)
+	}
+}
+
+// ProtocolFromBaseURL recognizes explicit wire-protocol routes. A model name
+// does not select the protocol when the URL already names a different API.
+// Arbitrary hosts and generic /v1 roots retain the caller's existing defaults.
+func ProtocolFromBaseURL(baseURL string) (Protocol, bool) {
+	endpoint, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil || endpoint.Host == "" || (endpoint.Scheme != "http" && endpoint.Scheme != "https") {
+		return "", false
+	}
+	path := strings.TrimRight(endpoint.Path, "/")
+	switch {
+	case strings.HasSuffix(path, "/anthropic"), strings.HasSuffix(path, "/anthropic/v1"), strings.HasSuffix(path, "/v1/messages"):
+		return ProtocolAnthropic, true
+	case strings.HasSuffix(path, "/chat/completions"):
+		return ProtocolOpenAIChat, true
+	case strings.HasSuffix(path, "/responses"):
+		return ProtocolOpenAIResponses, true
+	default:
+		return "", false
 	}
 }
 

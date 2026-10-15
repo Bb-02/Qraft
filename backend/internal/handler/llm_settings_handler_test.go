@@ -188,6 +188,12 @@ func TestLLMSettingsUpdateDerivesStableProviderAndProtocol(t *testing.T) {
 		wantProtocol string
 	}{
 		{
+			name:        "anthropic endpoint identifies protocol for non-Claude models",
+			body:        `{"model":"deepseek-flash","base_url":"https://api.deepseek.com/anthropic/","use_environment_key":true}`,
+			wantBaseURL: "https://api.deepseek.com/anthropic", wantProvider: "llm-endpoint:https://api.deepseek.com/anthropic",
+			wantProtocol: "anthropic-messages",
+		},
+		{
 			name:        "known model derives protocol",
 			body:        `{"model":"gemini-2.5-pro","base_url":"HTTPS://LLM.Example.COM/v1/","use_environment_key":true}`,
 			wantBaseURL: "https://llm.example.com/v1", wantProvider: "llm-endpoint:https://llm.example.com/v1",
