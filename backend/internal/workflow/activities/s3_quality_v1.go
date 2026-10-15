@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/Gingoo-TvT/Qraft/backend/internal/domain"
 	"github.com/Gingoo-TvT/Qraft/backend/internal/llm"
@@ -1562,6 +1563,10 @@ const (
 	s3ReviewerPromptVersionV3        = "v3"
 	s3ReviewerMaxTokensV3            = 8192
 	s3ReviewerReasoningMaxTokensV3   = 32768
+	s3ReviewerExpandedMaxTokensV3    = 65536
+	s3ReviewerBudgetRetryPromptIDV3  = "s3_strict_reviewer_v3_reasoning_budget_retry_1"
+	s3ReviewerBudgetFormatPromptIDV3 = "s3_strict_reviewer_v3_reasoning_budget_retry_1_format_repair_1"
+	s3ReviewerFormatBudgetPromptIDV3 = "s3_strict_reviewer_v3_format_repair_1_reasoning_budget_retry_1"
 )
 
 func s3ReviewerOutputBudgetV3(runtime *llm.RuntimeConfig) int {
@@ -1659,6 +1664,8 @@ func (a *Activities) S3StrictReviewerActivityV1(ctx context.Context, in S3Strict
 	}
 	req.MaxTokens = s3ReviewerOutputBudgetV3(req.Runtime)
 	activity.RecordHeartbeat(ctx, "reviewing complete S3 manifest and visible assets")
+	stopHeartbeat := heartbeatWhile(ctx, "reviewing complete S3 manifest and visible assets", 15*time.Second)
+	defer stopHeartbeat()
 	assessment, providerArtifact, sources, err := a.completeS3ReviewerFormatV2(ctx, req, in.TargetDifficulty > 0)
 	if err != nil {
 		return nil, err
@@ -1690,31 +1697,55 @@ func s3ReviewerOutputPromptV2(training bool) (string, error) {
 		"\nSet schema_version to algoforge.quality-review-assessment.v1. approved must be a boolean. Each of the five dimensions is an object with an integer score from 0 to 10 and nonempty notes, never a bare score or string. Use an explicit blockers array (empty only if no grounded blockers exist). Each blocker has code, responsible_asset and witness; witness has runner, fixture_ref and assertion. Preserve the actual review conclusions; no score or approved value in this format contract is a recommended outcome.", nil
 }
 
-// Format repair has its own durable effect identity. Activity redelivery reuses
-// both responses, while a malformed reply cannot cause unbounded model calls.
+// Format repair and the once-only reasoning budget expansion have separate
+// durable effects. Redelivery reuses every response; neither recovery can loop.
 func (a *Activities) completeS3ReviewerFormatV2(ctx context.Context, request *llm.Request, training bool) (qualitygate.ReviewAssessmentV1, *ArtifactRef, []*ArtifactRef, error) {
 	req := *request
 	req.Messages = append([]llm.Message(nil), request.Messages...)
 	var sources []*ArtifactRef
 	original := ""
+	budgetOriginal := ""
+	budgetExpanded := false
+	canExpandBudget := req.MaxTokens == s3ReviewerReasoningMaxTokensV3 && s3ReviewerOutputBudgetV3(req.Runtime) == s3ReviewerReasoningMaxTokensV3
 	for attempt := 0; attempt < 2; attempt++ {
 		key := s3ReviewerPromptIDV3
 		if attempt == 1 {
 			key = s3ReviewerFormatRepairPromptIDV3
+			if budgetExpanded {
+				key = s3ReviewerBudgetFormatPromptIDV3
+			}
 		}
-		req.PromptID = key
-		response, source, err := a.completeLLMWithProvenance(ctx, key, &req, 2)
-		if source != nil {
-			sources = append(sources, source)
-		}
-		if err != nil {
-			return qualitygate.ReviewAssessmentV1{}, source, sources, wrapRequiredProviderEffectError("strict S3 reviewer", err)
-		}
-		if response == nil || source == nil || source.LLMCallReceipt == nil {
-			return qualitygate.ReviewAssessmentV1{}, source, sources, s3ContractErrorV1("strict reviewer provider response is missing identity")
-		}
-		if modelResponseTruncatedV2(response) {
-			return qualitygate.ReviewAssessmentV1{}, source, sources, temporal.NewNonRetryableApplicationError("strict reviewer response was truncated at token limit", "ReviewerTruncatedError", nil)
+		var response *llm.Response
+		var source *ArtifactRef
+		for {
+			req.PromptID = key
+			var err error
+			response, source, err = a.completeLLMWithProvenance(ctx, key, &req, 2)
+			if source != nil {
+				sources = append(sources, source)
+			}
+			if err != nil {
+				return qualitygate.ReviewAssessmentV1{}, source, sources, wrapRequiredProviderEffectError("strict S3 reviewer", err)
+			}
+			if response == nil || source == nil || source.LLMCallReceipt == nil {
+				return qualitygate.ReviewAssessmentV1{}, source, sources, s3ContractErrorV1("strict reviewer provider response is missing identity")
+			}
+			if !modelResponseTruncatedV2(response) {
+				break
+			}
+			if !canExpandBudget || budgetExpanded {
+				return qualitygate.ReviewAssessmentV1{}, source, sources, temporal.NewNonRetryableApplicationError("strict reviewer response was truncated at token limit", "ReviewerTruncatedError", nil)
+			}
+			// A larger reasoning budget is a separate, once-only paid effect.
+			// Keep the original v3 request and cached response unchanged, so a
+			// completed assessment never pays for a new review on redelivery.
+			budgetExpanded = true
+			budgetOriginal = strings.TrimSpace(response.Text())
+			req.MaxTokens = s3ReviewerExpandedMaxTokensV3
+			key = s3ReviewerBudgetRetryPromptIDV3
+			if attempt == 1 {
+				key = s3ReviewerFormatBudgetPromptIDV3
+			}
 		}
 		text := strings.TrimSpace(response.Text())
 		assessment, decodeErr := qualitygate.DecodeReviewAssessmentV1([]byte(text))
@@ -1722,6 +1753,11 @@ func (a *Activities) completeS3ReviewerFormatV2(ctx context.Context, request *ll
 			assessment, decodeErr = qualitygate.DecodeTrainingReviewAssessmentV1([]byte(text))
 		}
 		if decodeErr == nil {
+			if budgetExpanded {
+				if err := s3ReviewerCorrectionPreservesConclusionsV2(budgetOriginal, assessment); err != nil {
+					return qualitygate.ReviewAssessmentV1{}, source, sources, s3ContractErrorV1("strict reviewer budget retry changed review conclusions: %v", err)
+				}
+			}
 			if attempt == 1 {
 				if err := s3ReviewerCorrectionPreservesConclusionsV2(original, assessment); err != nil {
 					return qualitygate.ReviewAssessmentV1{}, source, sources, s3ContractErrorV1("strict reviewer format correction changed review conclusions: %v", err)
