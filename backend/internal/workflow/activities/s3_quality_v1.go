@@ -600,9 +600,27 @@ func (a *Activities) MaterializeS3CasePlanActivityV1(ctx context.Context, in Mat
 		default:
 			return nil, s3ContractErrorV1("case %q must contain exactly one durable or inline input", testID)
 		}
+		if err != nil {
+			return nil, fmt.Errorf("read case %q input: %w", testID, err)
+		}
+		if inputRef.SHA256 != sha256Hex(raw) || inputRef.SizeBytes != int64(len(raw)) {
+			return nil, s3ContractErrorV1("case %q original input CAS identity mismatch", testID)
+		}
 		parsed, parseErr := speccontract.ParseTestCaseInputV2(*bundle.SemanticSpec, string(raw))
-		if parseErr != nil || parsed.CanonicalInput != string(raw) {
-			return nil, s3QualityErrorV1("case %q is not canonical SemanticSpec input: %v", testID, parseErr)
+		if parseErr != nil {
+			return nil, s3QualityErrorV1("case %q does not satisfy SemanticSpec input: %v", testID, parseErr)
+		}
+		var originalInputRef *ArtifactRef
+		normalizationRule := ""
+		if parsed.CanonicalInput != string(raw) {
+			original := inputRef
+			canonicalRef, normalizeErr := a.storeS3CanonicalCaseInputV1(ctx, testID, semanticSHA, testIdentity, original, parsed)
+			if normalizeErr != nil {
+				return nil, normalizeErr
+			}
+			originalInputRef, inputRef = &original, *canonicalRef
+			normalizationRule = S3CaseInputNormalizationRuleV1
+			raw = []byte(parsed.CanonicalInput)
 		}
 		bindings := integerCoverageBindingMapV1(parsed.Bindings)
 		boundaryRefs := make([]string, 0)
@@ -652,7 +670,7 @@ func (a *Activities) MaterializeS3CasePlanActivityV1(ctx context.Context, in Mat
 			digest := sha256.Sum256(raw)
 			seed = int64(binary.BigEndian.Uint64(digest[:8]) & uint64(^uint64(0)>>1))
 		}
-		plan.Cases[index] = S3ManifestCasePlanV1{TestID: testID, Purpose: purpose, ConstraintRegion: region, BoundaryRefs: boundaryRefs, Seed: seed, InputArtifact: inputRef, KilledWrongIDs: []string{}, KilledWrongIDsRetentionReason: "not measured by S3 source-of-truth case materializer v1"}
+		plan.Cases[index] = S3ManifestCasePlanV1{TestID: testID, Purpose: purpose, ConstraintRegion: region, BoundaryRefs: boundaryRefs, Seed: seed, InputArtifact: inputRef, OriginalInputArtifact: originalInputRef, InputNormalizationRuleVersion: normalizationRule, KilledWrongIDs: []string{}, KilledWrongIDsRetentionReason: "not measured by S3 source-of-truth case materializer v1"}
 		if len(raw) <= maxS3SanitizerCaseBytesV1 && len(sanitizerIdentities) < maxS3SanitizerCasesV1 && sanitizerBytes+len(raw) <= maxS3SanitizerSuiteBytesV1 {
 			plan.SanitizerCaseIDs = append(plan.SanitizerCaseIDs, testID)
 			sanitizerIdentities = append(sanitizerIdentities, struct {
@@ -1152,14 +1170,16 @@ func (a *Activities) RunSanitizerGateActivityV1(ctx context.Context, in S3Saniti
 }
 
 type S3ManifestCasePlanV1 struct {
-	TestID                        string      `json:"test_id"`
-	Purpose                       string      `json:"purpose"`
-	ConstraintRegion              string      `json:"constraint_region"`
-	BoundaryRefs                  []string    `json:"boundary_refs"`
-	Seed                          int64       `json:"seed"`
-	InputArtifact                 ArtifactRef `json:"input_artifact"`
-	KilledWrongIDs                []string    `json:"killed_wrong_ids"`
-	KilledWrongIDsRetentionReason string      `json:"killed_wrong_ids_retention_reason"`
+	TestID                        string       `json:"test_id"`
+	Purpose                       string       `json:"purpose"`
+	ConstraintRegion              string       `json:"constraint_region"`
+	BoundaryRefs                  []string     `json:"boundary_refs"`
+	Seed                          int64        `json:"seed"`
+	InputArtifact                 ArtifactRef  `json:"input_artifact"`
+	OriginalInputArtifact         *ArtifactRef `json:"original_input_artifact,omitempty"`
+	InputNormalizationRuleVersion string       `json:"input_normalization_rule_version,omitempty"`
+	KilledWrongIDs                []string     `json:"killed_wrong_ids"`
+	KilledWrongIDsRetentionReason string       `json:"killed_wrong_ids_retention_reason"`
 }
 
 type S3ManifestGateInputV1 struct {
@@ -1313,7 +1333,7 @@ func (a *Activities) BuildS3TestManifestActivityV1(ctx context.Context, in S3Man
 		}
 		seed := planCase.Seed
 		inputRef := planCase.InputArtifact
-		manifest.Cases[index] = TestManifestCaseV2{TestIndex: index, TestID: planCase.TestID, Purpose: planCase.Purpose, ConstraintRegion: planCase.ConstraintRegion, BoundaryRefs: append([]string(nil), planCase.BoundaryRefs...), Seed: &seed, InputArtifact: &inputRef, InputSHA256: inputRef.SHA256, OutputArtifact: outputRef, OutputSHA256: outputRef.SHA256, KilledWrongIDs: copyPresentS3StringsV1(planCase.KilledWrongIDs), KilledWrongIDsRetentionReason: planCase.KilledWrongIDsRetentionReason}
+		manifest.Cases[index] = TestManifestCaseV2{TestIndex: index, TestID: planCase.TestID, Purpose: planCase.Purpose, ConstraintRegion: planCase.ConstraintRegion, BoundaryRefs: copyPresentS3StringsV1(planCase.BoundaryRefs), Seed: &seed, InputArtifact: &inputRef, InputSHA256: inputRef.SHA256, OutputArtifact: outputRef, OutputSHA256: outputRef.SHA256, KilledWrongIDs: copyPresentS3StringsV1(planCase.KilledWrongIDs), KilledWrongIDsRetentionReason: planCase.KilledWrongIDsRetentionReason}
 		resolved[index] = IntegerBoundaryCoverageCaseInputV1{TestID: planCase.TestID, Input: string(inputBytes)}
 	}
 	validateCoverage := ValidateIntegerBoundaryCoverageV1
@@ -2139,6 +2159,9 @@ func (a *Activities) loadS3CasePlanV1(ctx context.Context, ref ArtifactRef) (*S3
 		}
 		if err := item.InputArtifact.Validate(item.InputArtifact.Bucket); err != nil {
 			return nil, nil, s3ContractErrorV1("S3 case-plan input artifact is invalid: %v", err)
+		}
+		if err := validateS3CaseInputNormalizationV1(item); err != nil {
+			return nil, nil, s3ContractErrorV1("S3 case-plan input normalization is invalid: %v", err)
 		}
 		caseByID[item.TestID] = item
 	}

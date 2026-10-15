@@ -40,7 +40,7 @@ type s3BatchGateFixtureV1 struct {
 	sanitizerFinding bool
 }
 
-func newS3BatchGateFixtureV1(t *testing.T) *s3BatchGateFixtureV1 {
+func newS3BatchGateFixtureV1(t *testing.T, configure ...func(*validatedSampleCandidatesFixture)) *s3BatchGateFixtureV1 {
 	t.Helper()
 	sampleInputs := []string{"0\n\n", "1\na\n", "2\nbb c\n", "3\nd ee fff\n"}
 	allInputs := make([]string, 12)
@@ -49,6 +49,9 @@ func newS3BatchGateFixtureV1(t *testing.T) *s3BatchGateFixtureV1 {
 	}
 	allInputs[11] = "3\ng hh iii\n"
 	authoring := tokenStringAuthoringFixtureV2(t, allInputs)
+	for _, apply := range configure {
+		apply(authoring)
+	}
 	authoring.bundle.RequestedTestCaseCount = 12
 	authoring.replaceBundle(t)
 	f := &s3BatchGateFixtureV1{store: authoring.store, authoringRef: authoring.statementDraftFixture.input.BundleArtifact}
