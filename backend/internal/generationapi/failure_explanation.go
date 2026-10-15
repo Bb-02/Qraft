@@ -20,6 +20,10 @@ func EnrichFailure(failure *domain.GenerationFailure) *domain.GenerationFailure 
 	if copy.Code == "generation_failed" || copy.Code == "model_output_invalid" || copy.Code == "model_output_truncated" || copy.Code == "verification_unavailable" || copy.Code == "verification_failed" || copy.Code == "quality_review_required" {
 		if explained := modelOutputFailure(copy.TechnicalDetails); explained != nil {
 			explained.TechnicalDetails = boundedFailureText(copy.TechnicalDetails, 6000)
+			if explained.Stage == "生成参考程序" {
+				explained.BlockedGate = copy.BlockedGate
+				explained.BlockingIssues = append([]string(nil), copy.BlockingIssues...)
+			}
 			return explained
 		}
 		if internal := internalDataContractFailure(copy.TechnicalDetails); internal != nil {
@@ -107,7 +111,7 @@ func modelOutputFailure(diagnostic string) *domain.GenerationFailure {
 		stage = "编写题面"
 	}
 	if stage == "" {
-		return nil
+		return mainSolutionOutputFailure(diagnostic)
 	}
 	retryable := false
 	failure := &domain.GenerationFailure{Code: "model_output_invalid", Category: "模型回复格式", Stage: stage,
