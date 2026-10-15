@@ -95,7 +95,8 @@ func TestS3ReviewerFormatV2RepairsOneMalformedReplyAndRetainsBothSources(t *test
 		var recorded recordedLLMResponse
 		require.NoError(t, json.Unmarshal(store.objects[source.SHA256], &recorded))
 		require.Equal(t, []string{bad, valid}[i], recorded.Response.Text())
-		require.Equal(t, "v2", recorded.CallReceipt.PromptVersion)
+		require.Equal(t, "v3", recorded.CallReceipt.PromptVersion)
+		require.Equal(t, []string{s3ReviewerPromptIDV3, s3ReviewerFormatRepairPromptIDV3}[i], recorded.CallReceipt.PromptID)
 	}
 	require.NotEqual(t, result.SourceArtifacts[0].LLMCallReceipt.RequestSHA256, result.SourceArtifacts[1].LLMCallReceipt.RequestSHA256)
 	require.Contains(t, provider.requests[0].System, `"additionalProperties":false`)

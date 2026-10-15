@@ -1556,6 +1556,28 @@ type S3StrictReviewerResultV1 struct {
 	SourceArtifacts    []*ArtifactRef                 `json:"source_artifacts,omitempty"`
 }
 
+const (
+	s3ReviewerPromptIDV3             = "s3_strict_reviewer_v3"
+	s3ReviewerFormatRepairPromptIDV3 = "s3_strict_reviewer_v3_format_repair_1"
+	s3ReviewerPromptVersionV3        = "v3"
+	s3ReviewerMaxTokensV3            = 8192
+	s3ReviewerReasoningMaxTokensV3   = 32768
+)
+
+func s3ReviewerOutputBudgetV3(runtime *llm.RuntimeConfig) int {
+	if runtime != nil {
+		switch strings.ToLower(strings.TrimSpace(runtime.ReasoningEffort)) {
+		case "minimal", "low", "medium", "high", "xhigh", "max":
+			// Reasoning and the final assessment share the provider's output
+			// budget. Keep the selected effort while leaving room for both.
+			return s3ReviewerReasoningMaxTokensV3
+		}
+	}
+	// Preserve compatibility with ordinary models when reasoning is disabled
+	// or no explicit reasoning preference was supplied.
+	return s3ReviewerMaxTokensV3
+}
+
 func (a *Activities) S3StrictReviewerActivityV1(ctx context.Context, in S3StrictReviewerInputV1) (*S3StrictReviewerResultV1, error) {
 	if in.PayloadVersion != S3QualityPayloadVersionV1 || strings.TrimSpace(in.SubjectID) == "" || !isManifestSHA256(in.SubjectRevision) {
 		return nil, s3ContractErrorV1("invalid strict reviewer identity")
@@ -1624,7 +1646,7 @@ func (a *Activities) S3StrictReviewerActivityV1(ctx context.Context, in S3Strict
 	if err != nil {
 		return nil, fmt.Errorf("build strict reviewer output contract: %w", err)
 	}
-	req := &llm.Request{MaxTokens: 8192, System: system, PromptVersion: "v2", Temperature: &temperature, Messages: []llm.Message{{Role: "user", Content: string(prompt)}}}
+	req := &llm.Request{System: system, PromptVersion: s3ReviewerPromptVersionV3, Temperature: &temperature, Messages: []llm.Message{{Role: "user", Content: string(prompt)}}}
 	if in.TargetDifficulty > 0 {
 		req.System += s3TrainingReviewerGuidanceV1
 	}
@@ -1635,6 +1657,7 @@ func (a *Activities) S3StrictReviewerActivityV1(ctx context.Context, in S3Strict
 		}
 		applyLLMRuntime(req, &copyRuntime)
 	}
+	req.MaxTokens = s3ReviewerOutputBudgetV3(req.Runtime)
 	activity.RecordHeartbeat(ctx, "reviewing complete S3 manifest and visible assets")
 	assessment, providerArtifact, sources, err := a.completeS3ReviewerFormatV2(ctx, req, in.TargetDifficulty > 0)
 	if err != nil {
@@ -1675,10 +1698,11 @@ func (a *Activities) completeS3ReviewerFormatV2(ctx context.Context, request *ll
 	var sources []*ArtifactRef
 	original := ""
 	for attempt := 0; attempt < 2; attempt++ {
-		key := "s3_strict_reviewer_v2"
+		key := s3ReviewerPromptIDV3
 		if attempt == 1 {
-			key = "s3_strict_reviewer_v2_format_repair_1"
+			key = s3ReviewerFormatRepairPromptIDV3
 		}
+		req.PromptID = key
 		response, source, err := a.completeLLMWithProvenance(ctx, key, &req, 2)
 		if source != nil {
 			sources = append(sources, source)
