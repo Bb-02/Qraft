@@ -73,24 +73,26 @@ type GenerateAuthoringPlanResult struct {
 // workflow versions. A model rejection has no spec or plan; a lint rejection
 // retains both invalid candidates together with the deterministic report.
 type AuthoringPlanBundleV1 struct {
-	SchemaVersion          string                     `json:"schema_version"`
-	InputSHA256            string                     `json:"input_sha256"`
-	BriefSHA256            string                     `json:"brief_sha256"`
-	RequestedTestCaseCount int                        `json:"requested_test_case_count,omitempty"`
-	RequestedSampleCount   int                        `json:"requested_sample_count,omitempty"`
-	MinTestCaseCount       int                        `json:"min_test_case_count,omitempty"`
-	MaxTestCaseCount       int                        `json:"max_test_case_count,omitempty"`
-	AdaptiveTestCaseCount  bool                       `json:"adaptive_test_case_count,omitempty"`
-	SourceArtifactSHA256   string                     `json:"source_artifact_sha256"`
-	SourceRequestSHA256    string                     `json:"source_request_sha256"`
-	DerivationRule         string                     `json:"derivation_rule"`
-	ModelDecision          string                     `json:"model_decision"`
-	Decision               string                     `json:"decision"`
-	GateReasonCode         string                     `json:"gate_reason_code,omitempty"`
-	RejectionReason        string                     `json:"rejection_reason,omitempty"`
-	SemanticSpec           *domain.SemanticSpecV1     `json:"semantic_spec,omitempty"`
-	AuthoringPlan          *domain.AuthoringPlanV1    `json:"authoring_plan,omitempty"`
-	LintReport             *speccontract.LintReportV1 `json:"lint_report,omitempty"`
+	SchemaVersion                string                     `json:"schema_version"`
+	InputSHA256                  string                     `json:"input_sha256"`
+	BriefSHA256                  string                     `json:"brief_sha256"`
+	RequestedTestCaseCount       int                        `json:"requested_test_case_count,omitempty"`
+	RequestedSampleCount         int                        `json:"requested_sample_count,omitempty"`
+	MinTestCaseCount             int                        `json:"min_test_case_count,omitempty"`
+	MaxTestCaseCount             int                        `json:"max_test_case_count,omitempty"`
+	AdaptiveTestCaseCount        bool                       `json:"adaptive_test_case_count,omitempty"`
+	SourceArtifactSHA256         string                     `json:"source_artifact_sha256"`
+	SourceRequestSHA256          string                     `json:"source_request_sha256"`
+	DerivationRule               string                     `json:"derivation_rule"`
+	ModelDecision                string                     `json:"model_decision"`
+	Decision                     string                     `json:"decision"`
+	GateReasonCode               string                     `json:"gate_reason_code,omitempty"`
+	RejectionReason              string                     `json:"rejection_reason,omitempty"`
+	SemanticSpec                 *domain.SemanticSpecV1     `json:"semantic_spec,omitempty"`
+	AuthoringPlan                *domain.AuthoringPlanV1    `json:"authoring_plan,omitempty"`
+	LintReport                   *speccontract.LintReportV1 `json:"lint_report,omitempty"`
+	TestIntentRepairArtifact     *ArtifactRef               `json:"test_intent_repair_artifact,omitempty"`
+	OriginalTestIntentPlanSHA256 string                     `json:"original_test_intent_plan_sha256,omitempty"`
 }
 
 type authoringPlanModelOutputV1 struct {
@@ -136,7 +138,7 @@ func (a *Activities) GenerateAuthoringPlanActivity(ctx context.Context, in Gener
 		return nil, fmt.Errorf("hash authoring-plan input: %w", err)
 	}
 
-	system, err := authoringPlanSystemPromptV4()
+	system, err := authoringPlanSystemPromptV5()
 	if err != nil {
 		return nil, fmt.Errorf("build authoring-plan output contract: %w", err)
 	}
@@ -145,8 +147,8 @@ func (a *Activities) GenerateAuthoringPlanActivity(ctx context.Context, in Gener
 	req := &llm.Request{
 		MaxTokens:     16000,
 		System:        system,
-		PromptID:      AuthoringPlanPromptIDV4,
-		PromptVersion: "v4",
+		PromptID:      AuthoringPlanPromptIDV5,
+		PromptVersion: "v5",
 		Temperature:   &temperature,
 		Messages: []llm.Message{
 			{Role: "user", Content: buildAuthoringPlanPromptV1(brief, params, in.Neighbors)},
@@ -158,7 +160,7 @@ func (a *Activities) GenerateAuthoringPlanActivity(ctx context.Context, in Gener
 	stopHB := heartbeatWhile(ctx, "calling LLM to generate SemanticSpec and AuthoringPlan", 15*time.Second)
 	// Version the logical effect key with the prompt contract. Changing the
 	// request under the old key would collide with a completed v1 response.
-	response, sourceArtifact, err := a.completeLLMWithProvenance(ctx, AuthoringPlanPromptIDV4, req, 2)
+	response, sourceArtifact, err := a.completeLLMWithProvenance(ctx, AuthoringPlanPromptIDV5, req, 2)
 	stopHB()
 	if err != nil {
 		return nil, wrapRequiredProviderEffectError("llm call for authoring-plan generation", err)
@@ -172,9 +174,9 @@ func (a *Activities) GenerateAuthoringPlanActivity(ctx context.Context, in Gener
 		// A completed but malformed response must not be replayed as a new paid
 		// attempt. A single separately cached format repair can correct its
 		// shape; the same strict parser and deterministic lint still apply.
-		repairReq := authoringPlanFormatRepairRequestV4(req, response.Text(), parseErr)
+		repairReq := authoringPlanFormatRepairRequestV5(req, response.Text(), parseErr)
 		stopHB = heartbeatWhile(ctx, "correcting authoring-plan JSON format", 15*time.Second)
-		response, sourceArtifact, err = a.completeLLMWithProvenance(ctx, AuthoringPlanFormatRepairPromptIDV4, repairReq, 2)
+		response, sourceArtifact, err = a.completeLLMWithProvenance(ctx, AuthoringPlanFormatRepairPromptIDV5, repairReq, 2)
 		stopHB()
 		if err != nil {
 			return nil, wrapRequiredProviderEffectError("llm call for authoring-plan format repair", err)
@@ -231,13 +233,31 @@ func (a *Activities) GenerateAuthoringPlanActivity(ctx context.Context, in Gener
 		parsed.AuthoringPlan.BriefSHA256 = briefSHA
 		parsed.AuthoringPlan.SemanticSpecSHA256 = speccontract.SemanticSpecSHA256V1(*parsed.SemanticSpec)
 
-		lintReport := speccontract.LintV1(speccontract.LintInputV1{
+		lintInput := speccontract.LintInputV1{
 			SemanticSpec:            *parsed.SemanticSpec,
 			AuthoringPlan:           *parsed.AuthoringPlan,
 			ExpectedBriefSHA256:     briefSHA,
 			ExpectedDifficulty:      params.Difficulty,
 			RequiredKnowledgePoints: append([]string(nil), params.Tags...),
-		})
+		}
+		lintReport := speccontract.LintV1(lintInput)
+		if lintReport.Passed {
+			if conflicts := authoringIntentConflictsV5(*parsed.SemanticSpec, *parsed.AuthoringPlan); len(conflicts) > 0 {
+				originalSHA, hashErr := canonicalJSONSHA256(*parsed.AuthoringPlan)
+				if hashErr != nil {
+					return nil, hashErr
+				}
+				intents, repairSource, repairErr := a.repairAuthoringIntentsV5(ctx, req, *parsed.SemanticSpec, *parsed.AuthoringPlan, conflicts)
+				if repairErr != nil {
+					return nil, repairErr
+				}
+				parsed.AuthoringPlan.TestIntents = intents
+				bundle.TestIntentRepairArtifact, bundle.OriginalTestIntentPlanSHA256 = repairSource, originalSHA
+				result.SourceArtifacts = append(result.SourceArtifacts, repairSource)
+				lintInput.AuthoringPlan = *parsed.AuthoringPlan
+				lintReport = speccontract.LintV1(lintInput)
+			}
+		}
 		bundle.SemanticSpec = parsed.SemanticSpec
 		bundle.AuthoringPlan = parsed.AuthoringPlan
 		bundle.LintReport = &lintReport

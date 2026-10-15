@@ -7,6 +7,7 @@ import (
 
 	"github.com/Gingoo-TvT/Qraft/backend/internal/domain"
 	"github.com/stretchr/testify/require"
+	"go.temporal.io/sdk/temporal"
 )
 
 func TestModelOutputFailureExplainsStageAndPreservesEvidence(t *testing.T) {
@@ -91,4 +92,58 @@ func TestUnsupportedOracleJudgeContractDoesNotBlameProgramOutputs(t *testing.T) 
 	}
 	got := DescribeFailure(errors.New(`parsing authoring-plan response: unknown field "unsupported oracle judge contract"`))
 	require.Equal(t, "model_output_invalid", got.Code)
+}
+
+func TestAuthoringPlanIntentConflictExplainsDesignStageAndKeepsEvidence(t *testing.T) {
+	for _, diagnostic := range []string{
+		`AuthoringPlanIntentConflictError: synthetic length=1 cannot contain distinct element minimum and maximum after one test-plan correction`,
+		`AuthoringPlanIntentConflictError: parsing authoring-plan response after one correction: invalid character in JSON`,
+		`AuthoringPlanIntentConflictError: correction deleted the original required test intent; difficulty 1200; oracle test validation was not started`,
+		`AuthoringPlanIntentConflictError: correction rejected; provider HTTP 401 appears only in nested synthetic technical evidence`,
+	} {
+		t.Run(diagnostic, func(t *testing.T) {
+			for _, err := range []error{errors.New(diagnostic), temporal.NewNonRetryableApplicationError(diagnostic, "AuthoringPlanIntentConflictError", nil)} {
+				got := DescribeFailure(err)
+				require.Equal(t, "test_plan_conflict", got.Code)
+				require.Equal(t, "测试计划冲突", got.Category)
+				require.Equal(t, "设计测试计划", got.Stage)
+				require.Equal(t, "测试计划中的边界要求互相冲突", got.Message)
+				require.Contains(t, got.Reason, "同一个输入")
+				require.Contains(t, got.Reason, "尝试一次")
+				require.Contains(t, got.Reason, "尚未进入程序或测试数据生成")
+				require.Contains(t, got.Suggestion, "保留原题意与目标难度")
+				require.NotContains(t, got.Suggestion, "API")
+				require.NotContains(t, got.Suggestion, "人工")
+				require.NotNil(t, got.Retryable)
+				require.False(t, *got.Retryable)
+				require.Equal(t, err.Error(), got.TechnicalDetails)
+			}
+		})
+	}
+}
+
+func TestAuthoringPlanIntentConflictHistoricalEnrichmentIsBoundedAndImmutable(t *testing.T) {
+	diagnostic := "AuthoringPlanIntentConflictError: " + strings.Repeat("synthetic evidence ", 600)
+	original := &domain.GenerationFailure{Code: "model_output_invalid", Message: "合成旧分类", TechnicalDetails: diagnostic}
+	got := EnrichFailure(original)
+	require.Equal(t, "test_plan_conflict", got.Code)
+	require.Equal(t, "设计测试计划", got.Stage)
+	require.Len(t, []rune(got.TechnicalDetails), 6000)
+	require.True(t, strings.HasPrefix(diagnostic, got.TechnicalDetails))
+	require.Equal(t, "model_output_invalid", original.Code)
+	require.Equal(t, "合成旧分类", original.Message)
+	require.Equal(t, diagnostic, original.TechnicalDetails)
+	require.Equal(t, got.Code, EnrichFailure(got).Code)
+	require.Equal(t, got.Reason, EnrichFailure(got).Reason)
+	wrapped := temporal.NewNonRetryableApplicationError("test intent correction did not preserve its requirements", "AuthoringPlanIntentConflictError", nil,
+		domain.GenerationFailure{Code: "model_output_invalid", Message: "合成旧分类", TechnicalDetails: "parsing authoring-plan response: invalid character"})
+	require.Equal(t, "test_plan_conflict", DescribeFailure(wrapped).Code, "server error type takes precedence over stale nested classification")
+
+	// Missing coverage without this server error is still a data-coverage
+	// failure, not evidence that authoring already attempted a correction.
+	plain := DescribeFailure(errors.New(`derived constraint-region obligation "synthetic" has no single matching case`))
+	require.NotEqual(t, "test_plan_conflict", plain.Code)
+	require.NotContains(t, plain.Reason, "尝试一次")
+	formatted := DescribeFailure(errors.New(`AuthoringPlanFormatError: unknown field "test_intent"`))
+	require.Equal(t, "model_output_invalid", formatted.Code)
 }

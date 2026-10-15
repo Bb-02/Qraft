@@ -20,6 +20,10 @@ func DescribeFailure(err error) *domain.GenerationFailure {
 			return preflight
 		}
 	}
+	if conflict := authoringPlanIntentConflictFailure(err.Error()); conflict != nil {
+		conflict.TechnicalDetails = boundedFailureText(err.Error(), 6000)
+		return conflict
+	}
 	if application != nil && application.HasDetails() {
 		var failure domain.GenerationFailure
 		if application.Details(&failure) == nil && failure.Code != "" && failure.Message != "" {

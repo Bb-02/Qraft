@@ -54,8 +54,8 @@ func TestAuthoringV4ResumesLegacyBriefWithoutChangingFrozenFactsOrHash(t *testin
 	require.True(t, result.LintPassed)
 	require.Len(t, model.requests, 1)
 	require.Equal(t, in.CanonicalBriefSHA256, result.BriefSHA256)
-	require.Equal(t, AuthoringPlanPromptIDV4, model.requests[0].PromptID)
-	require.Equal(t, "v4", model.requests[0].PromptVersion)
+	require.Equal(t, AuthoringPlanPromptIDV5, model.requests[0].PromptID)
+	require.Equal(t, "v5", model.requests[0].PromptVersion)
 	userPrompt := model.requests[0].Messages[0].Content
 	require.Contains(t, userPrompt, string(encoded), "legacy immutable brief and original task facts must remain in the request")
 	_, tail, ok := strings.Cut(userPrompt, "Current server input capabilities (authoritative;")

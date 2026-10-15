@@ -13,6 +13,10 @@ func EnrichFailure(failure *domain.GenerationFailure) *domain.GenerationFailure 
 		return nil
 	}
 	copy := *failure
+	if conflict := authoringPlanIntentConflictFailure(copy.TechnicalDetails); conflict != nil {
+		conflict.TechnicalDetails = boundedFailureText(copy.TechnicalDetails, 6000)
+		return conflict
+	}
 	if copy.Code == "generation_failed" || copy.Code == "model_output_invalid" || copy.Code == "model_output_truncated" || copy.Code == "verification_unavailable" || copy.Code == "verification_failed" || copy.Code == "quality_review_required" {
 		if explained := modelOutputFailure(copy.TechnicalDetails); explained != nil {
 			explained.TechnicalDetails = boundedFailureText(copy.TechnicalDetails, 6000)
@@ -40,6 +44,22 @@ func EnrichFailure(failure *domain.GenerationFailure) *domain.GenerationFailure 
 		}
 	}
 	return &copy
+}
+
+// A failed, bounded test-plan correction is a design failure even when its
+// nested diagnostic mentions JSON, a provider, or later verification stages.
+func authoringPlanIntentConflictFailure(diagnostic string) *domain.GenerationFailure {
+	if !strings.Contains(strings.ToLower(diagnostic), "authoringplanintentconflicterror") {
+		return nil
+	}
+	retryable := false
+	return &domain.GenerationFailure{
+		Code: "test_plan_conflict", Category: "测试计划冲突", Stage: "设计测试计划",
+		Message:    "测试计划中的边界要求互相冲突",
+		Reason:     "单个测试意图要求同一个输入同时满足互相冲突的边界。系统已尝试一次仅针对测试计划的纠正，仍未形成有效计划，尚未进入程序或测试数据生成。",
+		Suggestion: "重新规划能够同时满足的测试意图，保留原题意与目标难度，再重新生成。",
+		Retryable:  &retryable,
+	}
 }
 
 func unsupportedInputFailure(diagnostic string) *domain.GenerationFailure {

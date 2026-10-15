@@ -121,7 +121,7 @@ func TestAuthoringPlanV2RepairsOneFormatResponseAndPreservesBothSources(t *testi
 				t.Fatalf("format repair lost checks/sources: result=%+v calls=%d records=%d", result, len(model.requests), len(provenance.records))
 			}
 			first, corrected := result.SourceArtifacts[0], result.SourceArtifacts[1]
-			if first.LLMCallReceipt.PromptID != AuthoringPlanPromptIDV4 || corrected.LLMCallReceipt.PromptID != AuthoringPlanFormatRepairPromptIDV4 || first.LLMCallReceipt.PromptVersion != "v4" || first.LLMCallReceipt.RequestSHA256 == corrected.LLMCallReceipt.RequestSHA256 {
+			if first.LLMCallReceipt.PromptID != AuthoringPlanPromptIDV5 || corrected.LLMCallReceipt.PromptID != AuthoringPlanFormatRepairPromptIDV5 || first.LLMCallReceipt.PromptVersion != "v5" || first.LLMCallReceipt.RequestSHA256 == corrected.LLMCallReceipt.RequestSHA256 {
 				t.Fatalf("repair does not have independent immutable request identity: first=%+v corrected=%+v", first, corrected)
 			}
 			if first.Producer != corrected.Producer || first.Producer != result.BundleArtifact.Producer || !strings.Contains(first.Producer, "GenerateAuthoringPlanActivity") {
