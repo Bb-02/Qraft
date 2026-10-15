@@ -387,3 +387,45 @@ test('internal manifest and input normalization failures are not presented as mi
   const realParseError = failures.generationFailureSummary(cases[1][1].replace('<nil>', 'invalid integer'));
   assert.notEqual(realParseError.category, '出题流程输入规范化问题');
 });
+
+test('unconfirmed boundary and combination coverage stays distinct from file loss or an assumed program bug', () => {
+  const cases = [
+    ['derived allowed boundary obligation "allowed_boundary:synthetic-limit" is not covered', '测试边界覆盖不足', /实际输入是否命中该边界/],
+    ['derived range-edge obligation "range_edge:synthetic-value:max" is not covered', '测试边界覆盖不足', /值域端点/],
+    ['derived constraint-region obligation "constraint_region:synthetic-combination" has no single matching case', '测试约束组合覆盖不足', /同一个用例/],
+    ['derived constraint-region obligation "constraint_region:synthetic-combination" has no single matching case (region="synthetic-region", boundary_refs=[synthetic-a synthetic-b])', '测试约束组合覆盖不足', /也可能已有用例的区域标记/],
+    ['S3 test-data coverage preflight failed: missing obligation synthetic-required-case', '测试覆盖不足', /根据实际输入检查/],
+    ['S3 test-data coverage preflight failed: derived constraint-region obligation "constraint_region:synthetic-combination" has no single matching case (region="synthetic-region", boundary_refs=[synthetic-a synthetic-b])', '测试覆盖不足', /尚未进入后续独立验算/],
+    ['activity error (type: S3TestDataCoverageError): synthetic missing coverage', '测试覆盖不足', /覆盖预检未通过/],
+  ];
+  for (const [technical, category, reason] of cases) {
+    for (const code of ['generation_failed', 'verification_failed', 'quality_review_required']) {
+      const failure = { code, message: '参考解法或测试数据需要检查', suggestion: '打开候选题补齐测试文件，或由管理员人工确认', technical_details: technical, retryable: true };
+      for (const candidate of ['none', 'incomplete']) {
+        const summary = failures.generationFailureSummary(failure.message, failure, 'set', candidate);
+        assert.equal(summary.category, category);
+        assert.equal(summary.stage, '检查测试数据覆盖');
+        assert.match(summary.reason, reason);
+        assert.match(summary.suggestion, /补齐.*用例/);
+        assert.match(summary.suggestion, category === '测试覆盖不足' ? /重新检查覆盖/ : /核对并修正覆盖记录/);
+        assert.doesNotMatch(summary.suggestion, /模型|难度|人工|补齐测试文件|修正需求/);
+        assert.notEqual(summary.message, failure.message);
+        assert.equal(summary.technicalDetails, technical);
+        assert.equal(summary.retryable, false);
+      }
+      const html = renderSlot({ ...slot, status: 'failed', regenerate: true, failure, error: failure.message });
+      assert.match(html, /处理上述失败原因后/);
+      assert.match(html, /技术详情/);
+      assert.doesNotMatch(html, /人工审核并恢复原题位|打开候选题补齐测试文件|修正需求/);
+    }
+  }
+  for (const technical of cases.map(item => item[0])) {
+    for (const prefix of ['parsing authoring-plan response: unknown field ', 'TestDataFormatError: unknown field ', 'ReviewerFormatError: unknown field ']) {
+      const quoted = failures.generationFailureSummary(prefix + technical);
+      assert.equal(quoted.category, '模型输出格式错误');
+    }
+  }
+  const common = failures.commonGenerationFailure(cases.slice(0, 2).map(([technical]) => ({ status: 'failed', failure: { code: 'verification_failed', message: '参考解法或测试数据需要检查', technical_details: technical } })));
+  assert.equal(common.count, 2);
+  assert.equal(common.summary.category, '测试边界覆盖不足');
+});

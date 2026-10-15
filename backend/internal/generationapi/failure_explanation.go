@@ -22,6 +22,10 @@ func EnrichFailure(failure *domain.GenerationFailure) *domain.GenerationFailure 
 			internal.TechnicalDetails = boundedFailureText(copy.TechnicalDetails, 6000)
 			return internal
 		}
+		if coverage := testCoverageFailure(copy.TechnicalDetails); coverage != nil {
+			coverage.TechnicalDetails = boundedFailureText(copy.TechnicalDetails, 6000)
+			return coverage
+		}
 		if runtime := testDataExecutionFailure(copy.TechnicalDetails); runtime != nil {
 			runtime.TechnicalDetails = boundedFailureText(copy.TechnicalDetails, 6000)
 			return runtime

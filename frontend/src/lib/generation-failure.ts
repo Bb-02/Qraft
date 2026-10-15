@@ -30,6 +30,7 @@ const FAILURE_CATEGORY_LABELS: Record<string, string> = {
   verification_unavailable: '执行服务连接问题', invalid_difficulty: '生成参数问题',
   verification_request_limit: '执行请求超过服务限制', testdata_generator_empty_output: '测试数据生成器输出为空',
   test_manifest_boundary_refs_invalid: '出题流程内部格式问题', case_plan_input_normalization_failed: '出题流程输入规范化问题',
+  test_boundary_coverage_incomplete: '测试边界覆盖不足', test_constraint_region_coverage_incomplete: '测试约束组合覆盖不足', test_coverage_preflight_failed: '测试覆盖不足',
   statement_presentation_rejected: '题面表达检查未通过',
   oracle_identity_not_independent: '验证来源不够独立',
   unsupported_judge_contract: '流程能力限制',
@@ -88,6 +89,10 @@ export function generationFailureSummary(error: string, failure?: GenerationFail
   const manifestBoundaryRefs = failure?.code === 'test_manifest_boundary_refs_invalid' || /invalid TestManifest v2:\s*case "[^"\r\n]+" boundary_refs must be a present sorted unique array/i.test(evidence);
   const casePlanNormalization = failure?.code === 'case_plan_input_normalization_failed' || /materialize S3 case plan|MaterializeS3CasePlanActivityV1/i.test(evidence) && /case "[^"\r\n]+" is not canonical SemanticSpec input:\s*<nil>/i.test(evidence);
   const internalDataContract = (manifestBoundaryRefs || casePlanNormalization) && !authoringFormat && !reviewerFormat;
+  const uncoveredRegion = failure?.code === 'test_constraint_region_coverage_incomplete' || /derived constraint-region obligation "[^"\r\n]+" has no single matching case/i.test(evidence);
+  const uncoveredBoundary = failure?.code === 'test_boundary_coverage_incomplete' || /derived (?:allowed boundary|range-edge) obligation "[^"\r\n]+" is not covered/i.test(evidence);
+  const coveragePreflight = failure?.code === 'test_coverage_preflight_failed' || /S3 test-data coverage preflight failed:|\btype:\s*S3TestDataCoverageError\b/i.test(evidence);
+  const incompleteCoverage = (coveragePreflight || uncoveredRegion || uncoveredBoundary) && !authoringFormat && !reviewerFormat;
 
   if (failure?.code === 'oracle_identity_not_independent') {
     category = '验证来源不够独立'; stage = '独立解法验证';
@@ -117,6 +122,21 @@ export function generationFailureSummary(error: string, failure?: GenerationFail
     suggestion = manifestBoundaryRefs
       ? '管理员需修复测试清单的列表保存与校验流程，再重试未完成题目；无需因此修改题目需求或目标难度。'
       : '管理员需修复用例输入的规范化与一致性检查，再重试未完成题目；无需因此修改模型、题目需求或目标难度。';
+    retryable = false;
+  } else if (incompleteCoverage) {
+    category = coveragePreflight ? '测试覆盖不足' : uncoveredRegion ? '测试约束组合覆盖不足' : '测试边界覆盖不足';
+    stage = '检查测试数据覆盖';
+    message = coveragePreflight ? '测试数据未满足必测边界与组合覆盖要求。' : uncoveredRegion ? '某项约束组合尚未取得有效覆盖记录。' : '所需边界情况尚未取得有效覆盖记录。';
+    reason = coveragePreflight
+      ? '根据实际输入检查，生成的测试用例尚未覆盖全部必测边界或约束组合。覆盖预检未通过，尚未进入后续独立验算；这项检查不判断参考答案是否正确。'
+      : uncoveredRegion
+        ? '某个计划测试区域尚未确认由同一个用例同时覆盖所需条件。可能缺少这种组合用例，也可能已有用例的区域标记没有被正确计入，需要核对实际输入与覆盖记录。'
+        : '测试计划要求的某个取值边界或值域端点尚未确认被覆盖。需要核对实际输入是否命中该边界，以及覆盖标记是否完整；这项结果本身不表示答案错误或文件缺失。';
+    suggestion = coveragePreflight
+      ? '生成流程需补齐缺少的测试用例并重新检查覆盖，再重试未完成题目。'
+      : uncoveredRegion
+        ? '生成流程需补齐缺少的组合用例，或核对并修正覆盖记录后，再重试未完成题目。'
+        : '生成流程需补齐缺少的边界用例，或核对并修正覆盖记录后，再重试未完成题目。';
     retryable = false;
   } else if (requestLimit) {
     category = '执行请求超过服务限制'; stage = '提交程序执行请求';
@@ -209,7 +229,7 @@ export function generationFailureSummary(error: string, failure?: GenerationFail
   }
 
   const legacyClassification = failure && !failure.category && !failure.stage && !failure.reason;
-  const generic = legacyClassification && (failure.code === 'generation_failed' || (testDataFormat || statementFormat || internalDataContract || requestLimit || emptyGenerator || presentationRejected || unsupportedJudge) && ['verification_unavailable', 'verification_failed'].includes(failure.code));
+  const generic = legacyClassification && (failure.code === 'generation_failed' || (testDataFormat || statementFormat || internalDataContract || incompleteCoverage || requestLimit || emptyGenerator || presentationRejected || unsupportedJudge) && ['verification_unavailable', 'verification_failed'].includes(failure.code) || incompleteCoverage && failure.code === 'quality_review_required');
   if (!generic && failure?.message?.trim() && /[\u3400-\u9fff]/.test(failure.message) && !/workflow execution|activity error|application error|retryable:/i.test(failure.message)) message = failure.message.trim();
   if (!generic && failure?.suggestion?.trim()) suggestion = failure.suggestion.trim();
   if (failure?.category) category = /[\u3400-\u9fff]/.test(failure.category) ? failure.category.trim() : FAILURE_CATEGORY_LABELS[failure.category] || category;

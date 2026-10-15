@@ -36,6 +36,10 @@ func DescribeFailure(err error) *domain.GenerationFailure {
 		internal.TechnicalDetails = failure.TechnicalDetails
 		return internal
 	}
+	if coverage := testCoverageFailure(err.Error()); coverage != nil {
+		coverage.TechnicalDetails = failure.TechnicalDetails
+		return coverage
+	}
 	if runtime := testDataExecutionFailure(err.Error()); runtime != nil {
 		runtime.TechnicalDetails = failure.TechnicalDetails
 		return runtime
